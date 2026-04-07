@@ -3,12 +3,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
+from django.urls import reverse
 from django.shortcuts import get_object_or_404
 import logging
 import os
 
 from wharttest_django.viewsets import BaseModelViewSet
+from wharttest_django.permissions import permission_required
 from prompts.models import UserPrompt
+from .docx_editor_client import DocxEditorClientError, create_docx_editor_session
 from .models import (
     RequirementDocument,
     RequirementModule,
@@ -147,6 +150,13 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    def _get_latest_document_image(self, document, image_id):
+        return (
+            document.images.filter(image_id=image_id)
+            .order_by("-created_at")
+            .first()
+        )
+
     @action(
         detail=True,
         methods=["get"],
@@ -163,14 +173,14 @@ class RequirementDocumentViewSet(BaseModelViewSet):
 
         try:
             document = RequirementDocument.objects.get(pk=pk)
-            image = document.images.get(image_id=image_id)
+            image = self._get_latest_document_image(document, image_id)
+            if not image:
+                return Response({"error": "图片不存在"}, status=status.HTTP_404_NOT_FOUND)
             return FileResponse(
                 open(image.image_file.path, "rb"), content_type=image.content_type
             )
         except RequirementDocument.DoesNotExist:
             return Response({"error": "文档不存在"}, status=status.HTTP_404_NOT_FOUND)
-        except DocumentImage.DoesNotExist:
-            return Response({"error": "图片不存在"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"获取图片失败: {e}")
             return Response(
@@ -184,7 +194,11 @@ class RequirementDocumentViewSet(BaseModelViewSet):
         GET /api/requirements/documents/{id}/images-list/
         """
         document = self.get_object()
-        images = document.images.all().order_by("order")
+        deduplicated_images = {}
+        for image in document.images.all().order_by("order", "-created_at"):
+            deduplicated_images.setdefault(image.image_id, image)
+
+        images = list(deduplicated_images.values())
         data = [
             {
                 "id": str(img.id),
@@ -200,6 +214,120 @@ class RequirementDocumentViewSet(BaseModelViewSet):
         ]
         return Response({"images": data, "total": len(data)})
 
+    @action(detail=True, methods=["get"], url_path="download-file")
+    def download_file(self, request, pk=None):
+        """
+        下载文档原始文件
+        GET /api/requirements/documents/{id}/download-file/
+        """
+        from django.http import FileResponse
+
+        document = self.get_object()
+        if not document.file:
+            return Response({"error": "该文档没有原始文件"}, status=status.HTTP_404_NOT_FOUND)
+
+        ext = document.document_type or "docx"
+        content_type_map = {
+            "doc": "application/msword",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "pdf": "application/pdf",
+            "txt": "text/plain",
+            "md": "text/markdown",
+        }
+        content_type = content_type_map.get(ext, "application/octet-stream")
+        response = FileResponse(open(document.file.path, "rb"), content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{document.title}.{ext}"'
+        return response
+
+    @action(detail=True, methods=["post"], url_path="upload-edited-file")
+    @permission_required("requirements.change_requirementdocument")
+    def upload_edited_file(self, request, pk=None):
+        """
+        上传编辑后的 Word 文件并重新提取内容
+        POST /api/requirements/documents/{id}/upload-edited-file/
+        """
+        document = self.get_object()
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "未上传文件"}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_file_path = document.file.path if document.file else None
+        document.file.save(file.name, file, save=False)
+        document.save(update_fields=["file", "updated_at"])
+
+        if old_file_path:
+            try:
+                if os.path.exists(old_file_path) and old_file_path != document.file.path:
+                    os.remove(old_file_path)
+            except OSError:
+                pass
+
+        try:
+            from .services import DocumentProcessor
+
+            processor = DocumentProcessor()
+            content = processor.extract_content(document, force_file=True)
+            document.content = content or ""
+            document.word_count = len(document.content)
+            document.page_count = max(1, (document.word_count // 500) + 1)
+            document.status = "uploaded"
+            document.save(
+                update_fields=["content", "word_count", "page_count", "status", "updated_at"]
+            )
+
+            modules = document.modules.all().order_by("order")
+            if modules.exists():
+                logger.info(f"文档已有 {modules.count()} 个模块，标记需要重新拆分")
+        except Exception as e:
+            logger.error(f"重新提取内容失败: {e}")
+
+        return Response(
+            {
+                "content": document.content,
+                "word_count": document.word_count,
+                "page_count": document.page_count,
+                "status": document.status,
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="docx-editor/session")
+    @permission_required("requirements.change_requirementdocument")
+    def create_docx_editor_session(self, request, pk=None):
+        document = self.get_object()
+
+        if document.document_type not in {"doc", "docx"}:
+            return Response(
+                {"error": "仅 Word 文档支持在线编辑"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not document.file:
+            return Response(
+                {"error": "该文档没有原始文件，无法发起在线编辑"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        pushback_url = reverse(
+            "requirement-documents-upload-edited-file",
+            kwargs={"pk": document.id},
+        )
+
+        try:
+            payload = create_docx_editor_session(document, pushback_url=pushback_url)
+        except DocxEditorClientError as exc:
+            logger.error("DOCX Editor session creation failed for document %s: %s", document.id, exc)
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "iframe_url": payload.get("launch_url"),
+                "expires_at": payload.get("expires_at"),
+                "document_id": str(document.id),
+                "title": document.title,
+            }
+        )
     @action(detail=True, methods=["post"], url_path="split-modules")
     def split_modules(self, request, pk=None):
         """
