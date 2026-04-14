@@ -1378,9 +1378,19 @@ class AgentLoopStreamAPIView(View):
                         await sync_to_async(self._update_session_token_usage)(
                             session_id, input_tokens, output_tokens
                         )
-                        logger.info(
-                            f"AgentLoopStreamAPI: Token usage recorded - input={input_tokens}, output={output_tokens}"
-                        )
+                        # 检查缓存命中情况
+                        for msg in reversed(all_messages):
+                            if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                                cache_info = msg.usage_metadata.get("input_token_details", {})
+                                logger.info(
+                                    "AgentLoopStreamAPI: Token usage - input=%d, output=%d, cache_info=%s",
+                                    input_tokens, output_tokens, cache_info,
+                                )
+                                break
+                        else:
+                            logger.info(
+                                f"AgentLoopStreamAPI: Token usage recorded - input={input_tokens}, output={output_tokens}"
+                            )
                 except Exception as e:
                     logger.warning(
                         f"AgentLoopStreamAPI: Failed to calculate token count: {e}"
