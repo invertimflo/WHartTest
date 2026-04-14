@@ -24,6 +24,23 @@
               :label="option.label"
             />
           </a-select>
+          <a-select
+            v-if="showEnvironmentSelector"
+            v-model="selectedEnvironmentId"
+            :loading="environmentStore.loading"
+            :placeholder="tl('选择环境')"
+            style="width: 180px; margin-left: 10px;"
+            @change="handleEnvironmentChange"
+            @popup-visible-change="handleEnvironmentPopupVisibleChange"
+            allow-clear
+          >
+            <a-option
+              v-for="env in environmentStore.environments"
+              :key="env.id"
+              :value="env.id"
+              :label="env.name"
+            />
+          </a-select>
         </div>
       </div>
       <div class="user-info">
@@ -124,6 +141,11 @@
           <a-menu-item key="requirements" v-if="hasRequirementsPermission">
             <template #icon><icon-file /></template>
             <a href="#" @click="checkProjectAndNavigate($event, '/requirements')">{{ requirementsMenuLabel }}</a>
+          </a-menu-item>
+
+          <a-menu-item key="api-testing" v-if="hasApiTestingPermission">
+            <template #icon><icon-cloud /></template>
+            <a href="#" @click="checkProjectAndNavigate($event, '/api-testing')">{{ apiTestingMenuLabel }}</a>
           </a-menu-item>
 
           <a-menu-item key="ui-automation" v-if="hasUiAutomationPermission">
@@ -232,11 +254,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted } from 'vue';
+import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '@/store/authStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useThemeStore } from '@/store/themeStore';
+import { useEnvironmentStore } from '@/features/api-testing/stores/environmentStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { brandLogoUrl } from '@/utils/assetUrl';
 import AppLocaleToggle from '@/components/AppLocaleToggle.vue';
@@ -293,6 +316,7 @@ const router = useRouter();
 const authStore = useAuthStore();
 const projectStore = useProjectStore();
 const themeStore = useThemeStore();
+const environmentStore = useEnvironmentStore();
 const { locale, t, tl } = useAppI18n();
 
 // 版本信息
@@ -302,6 +326,7 @@ const hasUpdate = computed(() => versionInfo.value?.hasUpdate ?? false);
 const dashboardMenuLabel = computed(() => (locale.value === 'en-US' ? 'Home' : tl('首页')));
 const projectsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Projects' : tl('项目管理')));
 const requirementsMenuLabel = computed(() => (locale.value === 'en-US' ? 'Requirements' : tl('需求管理')));
+const apiTestingMenuLabel = computed(() => (locale.value === 'en-US' ? 'API Testing' : tl('接口自动化')));
 const automationMenuLabel = computed(() => (locale.value === 'en-US' ? 'Automation' : tl('UI自动化')));
 const tasksMenuLabel = computed(() => (locale.value === 'en-US' ? 'Tasks' : tl('任务中心')));
 const knowledgeMenuLabel = computed(() => (locale.value === 'en-US' ? 'RAG' : tl('知识库管理')));
@@ -361,6 +386,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/dashboard')) return 'dashboard';
   if (path.startsWith('/projects')) return 'projects';
   if (path.startsWith('/requirements')) return 'requirements'; // 添加对需求管理路由的识别
+  if (path.startsWith('/api-testing')) return 'api-testing';
   if (path.startsWith('/testsuites')) return 'testsuites'; // 添加对测试套件路由的识别
   if (path.startsWith('/test-executions')) return 'test-executions'; // 添加对执行历史路由的识别
   if (path.startsWith('/testcases')) return 'testcases';
@@ -408,6 +434,12 @@ const hasLangGraphChatPermission = computed(() => {
   return authStore.hasPermission('langgraph_integration.view_llmconfig') ||
          authStore.hasPermission('langgraph_integration.view_chatsession') ||
          authStore.hasPermission('langgraph_integration.view_chatmessage');
+});
+
+const hasApiTestingPermission = computed(() => {
+  return authStore.hasPermission('api_interfaces.view_apiinterface') ||
+         authStore.hasPermission('api_testcases.view_apitestcase') ||
+         authStore.hasPermission('api_testtasks.view_apitesttasksuite');
 });
 
 const hasUiAutomationPermission = computed(() => {
@@ -573,6 +605,45 @@ const handlePopupVisibleChange = (visible: boolean) => {
     projectStore.fetchProjects();
   }
 };
+
+// 环境选择器相关
+const showEnvironmentSelector = computed(() => {
+  const path = router.currentRoute.value.path;
+  return path.startsWith('/api-testing');
+});
+
+const selectedEnvironmentId = computed({
+  get: () => environmentStore.currentEnvironmentId,
+  set: (value) => {
+    environmentStore.setCurrentEnvironment(value);
+  }
+});
+
+const handleEnvironmentChange = (envId: number | null) => {
+  environmentStore.setCurrentEnvironment(envId ?? null);
+};
+
+const handleEnvironmentPopupVisibleChange = (visible: boolean) => {
+  if (visible && projectStore.currentProjectId) {
+    environmentStore.fetchEnvironments(projectStore.currentProjectId);
+  }
+};
+
+// 当项目变更时，重新加载环境列表
+watch(() => projectStore.currentProjectId, (newProjectId) => {
+  if (newProjectId && showEnvironmentSelector.value) {
+    environmentStore.fetchEnvironments(newProjectId);
+  } else {
+    environmentStore.$reset();
+  }
+});
+
+// 进入 api-testing 路由时加载环境列表
+watch(showEnvironmentSelector, (show) => {
+  if (show && projectStore.currentProjectId) {
+    environmentStore.fetchEnvironments(projectStore.currentProjectId);
+  }
+});
 
 // 在组件挂载时检查认证状态并加载项目列表
 onMounted(async () => {

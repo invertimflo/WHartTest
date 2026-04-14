@@ -1174,7 +1174,6 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
 
   // ── 审核状态 ──
   '待审核': 'Pending',
-  '通过': 'Passed',
   '优化': 'Optimize',
   '优化待审核': 'Re-review',
   '不可用': 'N/A',

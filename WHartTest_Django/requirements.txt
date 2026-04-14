@@ -294,3 +294,17 @@ nltk>=3.8.0
 # WebSocket客户端 - LGPL许可证 (用于WebSocket连接)
 # https://github.com/websocket-client/websocket-client/blob/master/LICENSE
 websocket-client>=1.6.0
+
+# === API 自动化测试 (TestRunner 集成) 依赖 ===
+
+# JSON Path 查询 - MIT许可证 (用于接口响应变量提取)
+jmespath>=1.0.0
+
+# SQL 数据库引擎 - MIT许可证 (httprunner SQL 接口执行)
+SQLAlchemy>=2.0
+
+# MySQL 驱动 - MIT许可证 (API 数据库配置连接 MySQL 测试目标)
+pymysql>=1.1.0
+
+# 日志库 - MIT许可证 (httprunner 运行时依赖)
+loguru>=0.4.1

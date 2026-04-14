@@ -135,7 +135,7 @@ service.interceptors.response.use(
         data: {
           success: res.status === 'success', // 根据后端状态判断是否成功
           data: res.data, // 直接传递data字段
-          total: response.headers['x-total-count'] ? parseInt(response.headers['x-total-count']) : undefined,
+          total: res.total ?? (response.headers['x-total-count'] ? parseInt(response.headers['x-total-count']) : undefined),
           message: res.message || 'success'
         }
       } as any;
@@ -147,7 +147,7 @@ service.interceptors.response.use(
       data: {
         success: true,
         data: res,
-        total: response.headers['x-total-count'] ? parseInt(response.headers['x-total-count']) : undefined,
+        total: res?.total ?? (response.headers['x-total-count'] ? parseInt(response.headers['x-total-count']) : undefined),
         message: 'success'
       }
     } as any;

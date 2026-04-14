@@ -132,6 +132,14 @@ INSTALLED_APPS = [
     "weixin_integration",  # 微信扫码登录与消息集成。
     'task_center', # 任务中心应用
     'django_celery_beat', # Celery Beat 数据库调度器
+    'api_database_configs',  # API 数据库配置应用。
+    'api_environments',  # API 环境管理应用。
+    'api_modules',  # API 接口模块应用。
+    'api_functions',  # API 自定义函数应用。
+    'api_interfaces',  # API 接口管理应用。
+    'api_testcases',  # API 测试用例应用。
+    'api_testtasks',  # API 测试任务应用。
+    'api_sync',  # API 接口同步应用。
 ]
 
 # ASGI 配置（用于 Channels WebSocket）
@@ -167,7 +175,7 @@ ROOT_URLCONF = "wharttest_django.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR.parent / "WHartTest_Vue" / "dist"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [

@@ -134,7 +134,12 @@ services:
     environment:
       - PORT=3001
       - HOST=0.0.0.0
-      - WHARTTEST_BACKEND_URL=http://backend:8000
+      # weixin-plugin-host 回调后端的地址
+      # - Docker 全量部署（后端也在容器内）：http://backend:8000（使用 Docker 内部网络）
+      # - 本地开发（后端在宿主机上）：http://host.docker.internal:8000
+      #   注意：后端必须监听 0.0.0.0（不能是 127.0.0.1），否则容器无法访问
+      #   启动命令示例：uvicorn wharttest_django.asgi:application --host 0.0.0.0 --port 8000
+      - WHARTTEST_BACKEND_URL=${WHARTTEST_BACKEND_URL:-http://backend:8000}
       - WHARTTEST_API_KEY=${WHARTTEST_API_KEY:-wharttest-default-mcp-key-2025}
       - WHARTTEST_SHARED_DATA_DIR=/app/data
       - OPENCLAW_STATE_DIR=/app/data/openclaw-state

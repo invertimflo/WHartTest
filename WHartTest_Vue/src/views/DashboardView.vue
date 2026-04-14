@@ -43,6 +43,19 @@
 
           <div class="overview-card">
             <div class="overview-header">
+              <icon-code class="overview-icon" />
+              <span class="overview-title">{{ dashboardText.apiTestingTitle }}</span>
+            </div>
+            <div class="overview-value">{{ statistics?.api_testing?.total_cases || 0 }}</div>
+            <div class="overview-sub">
+              <span class="sub-item">{{ dashboardText.interfaces }} {{ statistics?.api_testing?.total_interfaces || 0 }}</span>
+              <span class="sub-item passed">{{ dashboardText.completed }} {{ statistics?.api_testing?.execution_by_status?.completed || 0 }}</span>
+              <span class="sub-item failed">{{ dashboardText.failed }} {{ statistics?.api_testing?.execution_by_status?.failed || 0 }}</span>
+            </div>
+          </div>
+
+          <div class="overview-card">
+            <div class="overview-header">
               <icon-thunderbolt class="overview-icon" />
               <span class="overview-title">{{ dashboardText.executionStatsTitle }}</span>
             </div>
@@ -295,6 +308,10 @@ const dashboardText = computed(() => (
         periodMonth: 'Month',
         fetchStatisticsFailed: 'Failed to load statistics',
         fetchStatisticsError: 'An error occurred while loading statistics',
+        apiTestingTitle: 'API Testing',
+        interfaces: 'Interfaces',
+        cases: 'Cases',
+        completed: 'Completed',
       }
     : {
         noProjectDescription: '请在顶部选择一个项目查看统计数据',
@@ -333,6 +350,10 @@ const dashboardText = computed(() => (
         periodMonth: '月',
         fetchStatisticsFailed: '获取统计数据失败',
         fetchStatisticsError: '获取统计数据时发生错误',
+        apiTestingTitle: 'API 自动化测试',
+        interfaces: '接口',
+        cases: '用例',
+        completed: '完成',
       }
 ));
 
@@ -498,7 +519,7 @@ onMounted(() => {
 /* 顶部概览卡片 */
 .overview-section {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 10px;
 }
 
@@ -938,6 +959,12 @@ onMounted(() => {
 .legend-tag.failed::before { background: #ff4d4f; }
 
 /* 响应式 */
+@media (max-width: 1400px) {
+  .overview-section {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
 @media (max-width: 1200px) {
   .overview-section {
     grid-template-columns: repeat(2, 1fr);
