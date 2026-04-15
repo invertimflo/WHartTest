@@ -785,9 +785,10 @@ class AgentLoopStreamAPIView(View):
     MAX_STEPS = 500
 
     def _update_session_token_usage(
-        self, session_id: str, input_tokens: int, output_tokens: int
+        self, session_id: str, input_tokens: int, output_tokens: int,
+        cache_read_tokens: int = 0, user_id=None, project_id=None,
     ):
-        """更新会话的 Token 使用统计"""
+        """更新会话的 Token 使用统计，同时写入独立的 TokenUsageRecord"""
         try:
             from django.db.models import F
             from django.utils import timezone
@@ -796,11 +797,28 @@ class AgentLoopStreamAPIView(View):
                 total_input_tokens=F("total_input_tokens") + input_tokens,
                 total_output_tokens=F("total_output_tokens") + output_tokens,
                 total_tokens=F("total_tokens") + input_tokens + output_tokens,
+                total_cache_read_tokens=F("total_cache_read_tokens") + cache_read_tokens,
                 request_count=F("request_count") + 1,
                 updated_at=timezone.now(),
             )
         except Exception as e:
             logger.warning(f"Failed to update session token usage: {e}")
+
+        # 写入独立记录（不随会话删除而丢失）
+        try:
+            from langgraph_integration.models import TokenUsageRecord
+
+            TokenUsageRecord.objects.create(
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                cache_read_tokens=cache_read_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create TokenUsageRecord: {e}")
 
     async def authenticate_request(self, request):
         """JWT 认证"""
@@ -1373,24 +1391,30 @@ class AgentLoopStreamAPIView(View):
                         }
                     )
 
-                    # 记录 Token 使用量到 ChatSession
+                    # 记录 Token 使用量到 ChatSession + TokenUsageRecord
                     if input_tokens > 0 or output_tokens > 0:
-                        await sync_to_async(self._update_session_token_usage)(
-                            session_id, input_tokens, output_tokens
-                        )
-                        # 检查缓存命中情况
+                        # 提取缓存命中信息
+                        cache_read_tokens = 0
                         for msg in reversed(all_messages):
                             if hasattr(msg, "usage_metadata") and msg.usage_metadata:
                                 cache_info = msg.usage_metadata.get("input_token_details", {})
+                                cache_read_tokens = cache_info.get("cache_read", 0) or 0
                                 logger.info(
-                                    "AgentLoopStreamAPI: Token usage - input=%d, output=%d, cache_info=%s",
-                                    input_tokens, output_tokens, cache_info,
+                                    "AgentLoopStreamAPI: Token usage - input=%d, output=%d, cache_read=%d, cache_info=%s",
+                                    input_tokens, output_tokens, cache_read_tokens, cache_info,
                                 )
                                 break
                         else:
                             logger.info(
                                 f"AgentLoopStreamAPI: Token usage recorded - input={input_tokens}, output={output_tokens}"
                             )
+
+                        await sync_to_async(self._update_session_token_usage)(
+                            session_id, input_tokens, output_tokens,
+                            cache_read_tokens=cache_read_tokens,
+                            user_id=request.user.id,
+                            project_id=int(project_id) if project_id else None,
+                        )
                 except Exception as e:
                     logger.warning(
                         f"AgentLoopStreamAPI: Failed to calculate token count: {e}"
@@ -2211,13 +2235,27 @@ class AgentLoopResumeAPIView(View):
                         }
                     )
 
-                    # 记录 Token 使用量到 ChatSession
+                    # 记录 Token 使用量到 ChatSession + TokenUsageRecord
                     if input_tokens > 0 or output_tokens > 0:
+                        # 提取缓存命中信息
+                        cache_read_tokens = 0
+                        for msg in reversed(all_messages):
+                            if hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                                cache_info = msg.usage_metadata.get("input_token_details", {})
+                                cache_read_tokens = cache_info.get("cache_read", 0) or 0
+                                break
+
                         await sync_to_async(
                             AgentLoopStreamAPIView()._update_session_token_usage
-                        )(session_id, input_tokens, output_tokens)
+                        )(
+                            session_id, input_tokens, output_tokens,
+                            cache_read_tokens=cache_read_tokens,
+                            user_id=user.id,
+                            project_id=int(project_id) if project_id else None,
+                        )
                         logger.info(
-                            f"AgentLoopResumeAPI: Token usage recorded - input={input_tokens}, output={output_tokens}"
+                            "AgentLoopResumeAPI: Token usage - input=%d, output=%d, cache_read=%d",
+                            input_tokens, output_tokens, cache_read_tokens,
                         )
                 except Exception as e:
                     logger.warning(

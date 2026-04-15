@@ -707,6 +707,7 @@ export interface TokenUsageStats {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    cache_read_tokens: number;
     request_count: number;
     session_count: number;
   };
@@ -716,6 +717,7 @@ export interface TokenUsageStats {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    cache_read_tokens: number;
     request_count: number;
     session_count: number;
   }>;
@@ -724,6 +726,7 @@ export interface TokenUsageStats {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    cache_read_tokens: number;
     request_count: number;
     session_count: number;
   }>;
