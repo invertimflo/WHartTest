@@ -33,7 +33,7 @@ data
 temp/
 tmp/
 docker-images
-
+PandaWiki-skill/
 # Cache directories
 .cache/
 .npm/
