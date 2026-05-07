@@ -308,3 +308,7 @@ pymysql>=1.1.0
 
 # 日志库 - MIT许可证 (httprunner 运行时依赖)
 loguru>=0.4.1
+
+# Sentry Python SDK - MIT许可证 (httprunner 可选错误上报依赖)
+# https://github.com/getsentry/sentry-python/blob/master/LICENSE
+sentry-sdk==2.57.0

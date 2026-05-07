@@ -1535,18 +1535,17 @@ run_local_mode() {
 }
 
 collect_status_and_logs() {
-  echo "收集主要服务状态与日志..."
+  echo "收集主要服务状态..."
   local services=(backend redis postgres qdrant mcp frontend playwright-mcp)
 
   "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" ps
 
   for svc in "${services[@]}"; do
-    echo "--- 日志: $svc（最近 200 行）---"
-    "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" logs --tail 200 "$svc" | tee "$LOG_DIR/$svc.log" || true
+    "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" logs --tail 200 "$svc" > "$LOG_DIR/$svc.log" 2>&1 || true
   done
 
   echo "日志已保存到 $LOG_DIR/*.log"
-  echo "如果服务启动失败，请先查看日志，并检查端口占用与宿主机挂载文件是否可用。"
+  echo "如果服务启动失败，请查看日志文件，并检查端口占用与宿主机挂载文件是否可用。"
 }
 
 print_summary() {

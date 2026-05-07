@@ -13,8 +13,12 @@ from multiprocessing import Queue
 from typing import Any, Dict, List
 
 import requests
-import sentry_sdk
 from loguru import logger
+
+try:
+    import sentry_sdk
+except ModuleNotFoundError:
+    sentry_sdk = None
 
 from httprunner import __version__, exceptions
 from httprunner.models import VariablesMapping
@@ -41,6 +45,10 @@ def get_platform():
 
 def init_sentry_sdk():
     if os.getenv("DISABLE_SENTRY") == "true":
+        return
+
+    if sentry_sdk is None:
+        logger.debug("sentry_sdk is not installed; skipping Sentry initialization")
         return
 
     sentry_sdk.init(
