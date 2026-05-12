@@ -78,6 +78,15 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     }
   }
 
+  function removeInterfaceTabs(interfaceId: number): string[] {
+    const tabIds = tabs.value
+      .filter(tab => tab.interfaceId === interfaceId)
+      .map(tab => tab.id);
+
+    tabIds.forEach(removeTab);
+    return tabIds;
+  }
+
   function openOrActivateInterface(api: { id?: number; name?: string; method?: string; url?: string; module?: any }): string {
     if (api.id) {
       const existing = tabs.value.find(t => t.interfaceId === api.id);
@@ -154,6 +163,7 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     createTab,
     activateTab,
     removeTab,
+    removeInterfaceTabs,
     openOrActivateInterface,
     updateTabRequest,
     updateTabResponse,

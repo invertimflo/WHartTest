@@ -412,6 +412,13 @@ const handleUpdateInterface = (api: ApiInterface) => {
   }
 }
 
+const removeInterfaceFromLocalLists = (interfaceId: number) => {
+  interfaces.value = interfaces.value.filter(item => item.id !== interfaceId)
+  noModuleInterfaces.value = noModuleInterfaces.value.filter(item => item.id !== interfaceId)
+  allInterfaces.value = allInterfaces.value.filter(item => item.id !== interfaceId)
+  hasNoModuleInterfaces.value = noModuleInterfaces.value.length > 0
+}
+
 // 删除接口
 const handleDeleteInterface = (api: ApiInterface) => {
   const modalLoading = ref(false)
@@ -430,12 +437,44 @@ const handleDeleteInterface = (api: ApiInterface) => {
       modalLoading.value = true
       
       try {
+        const previousActiveTabId = tabsStore.activeTabId
+        const deletingCurrentInterface = selectedInterface.value?.id === api.id
+        const previousActiveTab = previousActiveTabId
+          ? tabsStore.tabs.find(tab => tab.id === previousActiveTabId)
+          : undefined
         await deleteInterface(api.id!)
         Message.success('删除接口成功')
+
+        removeInterfaceFromLocalLists(api.id!)
+
+        const removedTabIds = tabsStore.removeInterfaceTabs(api.id!)
+
+        if (
+          removedTabIds.length === 0 &&
+          deletingCurrentInterface &&
+          previousActiveTab?.id &&
+          !previousActiveTab.interfaceId
+        ) {
+          tabsStore.removeTab(previousActiveTab.id)
+          removedTabIds.push(previousActiveTab.id)
+        }
+
+        const deletedActiveTab = previousActiveTabId
+          ? removedTabIds.includes(previousActiveTabId)
+          : false
         
         // 如果删除的是当前选中的接口，清空选中状态
         if (selectedInterface.value?.id === api.id) {
           selectedInterface.value = undefined
+        }
+
+        if (deletedActiveTab) {
+          if (tabsStore.activeTabId) {
+            handleTabChange(tabsStore.activeTabId)
+          } else {
+            viewMode.value = 'list'
+            detailKey.value++
+          }
         }
         
         // 如果接口有模块ID，刷新该模块的接口列表

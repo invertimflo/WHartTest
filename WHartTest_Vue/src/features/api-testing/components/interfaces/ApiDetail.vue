@@ -414,6 +414,23 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
       emit('refresh', normalizedModuleId)
     }
 
+    if (tabsStore.activeTabId && savedInterface) {
+      tabsStore.updateTabRequest(tabsStore.activeTabId, {
+        interfaceId: savedInterface.id,
+        method: savedInterface.method,
+        url: savedInterface.url,
+        name: savedInterface.name,
+        module: savedInterface.module,
+        params: savedInterface.params,
+        headers: savedInterface.headers,
+        body: savedInterface.body,
+        setupHooks: savedInterface.setup_hooks,
+        teardownHooks: savedInterface.teardown_hooks,
+        extractRules: savedInterface.extract,
+        assertRules: savedInterface.validators
+      })
+    }
+
     // 确保更新后的接口数据包含ID
     console.log('最终的接口数据:', savedInterface)
   } catch (error: any) {
