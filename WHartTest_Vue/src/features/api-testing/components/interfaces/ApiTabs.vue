@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { IconClose, IconPlus, IconSend } from '@arco-design/web-vue/es/icon'
+import { IconClose, IconPlus } from '@arco-design/web-vue/es/icon'
 import { useApiTabsStore } from '../../stores/apiTabsStore'
 import type { ApiInterface } from '../../services/interfaceService'
 
@@ -10,6 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'tab-change': [tabId: string]
+  'new-interface': []
 }>()
 
 const tabsStore = useApiTabsStore()
@@ -28,6 +29,10 @@ const handleTabClick = (tabId: string) => {
 const handleCloseTab = (e: Event, tabId: string) => {
   e.stopPropagation()
   tabsStore.removeTab(tabId)
+}
+
+const handleCreateInterface = () => {
+  emit('new-interface')
 }
 
 
@@ -106,10 +111,23 @@ const getMethodColor = (method: string) => {
           />
         </div>
         
-        <!-- 提示文本（当没有页签时显示） -->
-        <div v-if="tabs.length === 0" class="tabs-empty-hint text-sm py-1 px-3">
-          请从左侧选择或创建接口开始调试
+        <div v-if="tabs.length === 0" class="tabs-empty-state py-1 px-3">
+          <a-button type="primary" size="small" @click="handleCreateInterface">
+            <template #icon><icon-plus /></template>
+            新建接口
+          </a-button>
+          <span class="tabs-empty-hint text-sm">请从这里新建接口，或从左侧选择已有接口开始调试</span>
         </div>
+
+        <a-button
+          v-else
+          class="tabs-create-button"
+          size="small"
+          @click="handleCreateInterface"
+          title="新建接口"
+        >
+          <template #icon><icon-plus /></template>
+        </a-button>
       </div>
     </div>
   </div>
@@ -120,6 +138,13 @@ const getMethodColor = (method: string) => {
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(148, 163, 184, 0.16);
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+}
+
+.tabs-empty-state {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .tab-chip--active {
@@ -141,6 +166,10 @@ const getMethodColor = (method: string) => {
 
 .tabs-empty-hint {
   color: var(--color-text-3);
+}
+
+.tabs-create-button {
+  flex-shrink: 0;
 }
 
 :global(body.api-testing-theme) .api-tabs-card {

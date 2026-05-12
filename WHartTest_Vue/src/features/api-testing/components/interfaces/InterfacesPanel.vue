@@ -925,10 +925,6 @@ watch(() => tabsStore.tabs, () => {
                 <template #icon><icon-plus /></template>
                 模块
               </a-button>
-              <a-button type="text" size="small" @click="handleCreateInterface">
-                <template #icon><icon-plus /></template>
-                接口
-              </a-button>
             </div>
           </div>
           <a-input-search
