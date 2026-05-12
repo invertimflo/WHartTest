@@ -1,5 +1,11 @@
 import arcoEnUS from '@arco-design/web-vue/es/locale/lang/en-us';
 import arcoZhCN from '@arco-design/web-vue/es/locale/lang/zh-cn';
+import {
+  API_TESTING_LEGACY_EXACT_EN_MAP,
+  API_TESTING_LEGACY_EXACT_ZH_OVERRIDES,
+  API_TESTING_LEGACY_REGEX_EN_MAP,
+  API_TESTING_LEGACY_REGEX_ZH_MAP,
+} from './apiTestingLegacyMap';
 
 export const APP_LOCALES = ['zh-CN', 'en-US'] as const;
 export type AppLocale = (typeof APP_LOCALES)[number];
@@ -1177,7 +1183,18 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '优化': 'Optimize',
   '优化待审核': 'Re-review',
   '不可用': 'N/A',
+  ...API_TESTING_LEGACY_EXACT_EN_MAP,
 };
+
+const LEGACY_EXACT_ZH_MAP = Object.entries(LEGACY_EXACT_EN_MAP).reduce<Record<string, string>>((result, [zh, en]) => {
+  if (!(en in result)) {
+    result[en] = zh;
+  }
+
+  return result;
+}, {
+  ...API_TESTING_LEGACY_EXACT_ZH_OVERRIDES,
+});
 
 const LEGACY_REGEX_EN_MAP: Array<[RegExp, (...groups: string[]) => string]> = [
   [/^已选择\s*(\d+)\s*张图片$/, (count) => `${count} image(s) selected`],
@@ -1223,24 +1240,28 @@ const LEGACY_REGEX_EN_MAP: Array<[RegExp, (...groups: string[]) => string]> = [
   // Image preview with count
   [/^图片预览\s*\((\d+)\/(\d+)\)$/, (cur, total) => `Image preview (${cur}/${total})`],
   [/^所有图片\s*\((\d+)\)$/, (count) => `All images (${count})`],
+  ...API_TESTING_LEGACY_REGEX_EN_MAP,
+];
+
+const LEGACY_REGEX_ZH_MAP: Array<[RegExp, (...groups: string[]) => string]> = [
+  ...API_TESTING_LEGACY_REGEX_ZH_MAP,
 ];
 
 export const translateLegacyText = (text: string, locale: AppLocale) => {
-  if (locale !== 'en-US') {
-    return text;
-  }
-
   const trimmed = text.trim();
   if (!trimmed) {
     return text;
   }
 
-  const exact = LEGACY_EXACT_EN_MAP[trimmed];
+  const exactMap = locale === 'en-US' ? LEGACY_EXACT_EN_MAP : LEGACY_EXACT_ZH_MAP;
+  const regexMap = locale === 'en-US' ? LEGACY_REGEX_EN_MAP : LEGACY_REGEX_ZH_MAP;
+
+  const exact = exactMap[trimmed];
   if (exact) {
     return preserveWhitespace(text, exact);
   }
 
-  for (const [pattern, resolver] of LEGACY_REGEX_EN_MAP) {
+  for (const [pattern, resolver] of regexMap) {
     const match = trimmed.match(pattern);
     if (!match) {
       continue;

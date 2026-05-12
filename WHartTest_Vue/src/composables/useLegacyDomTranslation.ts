@@ -11,17 +11,22 @@ const TEXT_SKIP_SELECTOR = [
   'code',
   '[contenteditable="true"]',
   '.arco-select',
-  '.arco-select-dropdown',
   '.arco-cascader',
-  '.arco-cascader-panel',
   '.arco-tree-select',
-  '.arco-dropdown',
-  '.arco-trigger-menu',
   '.arco-input-wrapper',
   '.arco-input-tag',
   '.arco-picker',
-  '.arco-pagination',
-  '.arco-auto-complete',
+  '.monaco-editor',
+  '.monaco-hover',
+  '.view-lines',
+  '.message-render-skip',
+].join(', ');
+
+const ATTRIBUTE_SKIP_SELECTOR = [
+  '[data-i18n-skip]',
+  'pre',
+  'code',
+  '[contenteditable="true"]',
   '.monaco-editor',
   '.monaco-hover',
   '.view-lines',
@@ -30,9 +35,11 @@ const TEXT_SKIP_SELECTOR = [
 
 const ATTRIBUTE_NAMES = ['placeholder', 'title', 'aria-label'];
 
-interface TranslationOptions {
-  restoreOriginal?: boolean;
-}
+type LegacyLocale = 'zh-CN' | 'en-US';
+
+const getAlternateLocale = (locale: LegacyLocale): LegacyLocale => (
+  locale === 'en-US' ? 'zh-CN' : 'en-US'
+);
 
 const isTextNodeTranslatable = (node: Text) => {
   const parentElement = node.parentElement;
@@ -50,8 +57,7 @@ const isTextNodeTranslatable = (node: Text) => {
 
 const translateTextNode = (
   node: Text,
-  locale: 'zh-CN' | 'en-US',
-  options: TranslationOptions = {},
+  locale: LegacyLocale,
 ) => {
   if (!isTextNodeTranslatable(node)) {
     return;
@@ -63,23 +69,15 @@ const translateTextNode = (
   }
 
   const originalText = observedTextNodes.get(node) ?? currentText;
+  const translatedOriginalText = translateLegacyText(originalText, locale);
+  const translatedAlternateText = translateLegacyText(originalText, getAlternateLocale(locale));
 
-  if (locale === 'zh-CN') {
-    if (options.restoreOriginal) {
-      if (currentText !== originalText) {
-        node.nodeValue = originalText;
-      }
-      return;
-    }
-
-    if (currentText !== originalText) {
-      observedTextNodes.set(node, currentText);
-    }
+  if (currentText === translatedOriginalText) {
     return;
   }
 
-  const translatedOriginalText = translateLegacyText(originalText, locale);
-  if (currentText === translatedOriginalText) {
+  if (currentText === translatedAlternateText) {
+    node.nodeValue = translatedOriginalText;
     return;
   }
 
@@ -100,8 +98,7 @@ const translateTextNode = (
 const translateAttributeValue = (
   element: Element,
   attributeName: string,
-  locale: 'zh-CN' | 'en-US',
-  options: TranslationOptions = {},
+  locale: LegacyLocale,
 ) => {
   const currentValue = element.getAttribute(attributeName);
   if (currentValue === null) {
@@ -119,23 +116,15 @@ const translateAttributeValue = (
   }
 
   const originalValue = originalValues.get(attributeName) ?? currentValue;
+  const translatedOriginalValue = translateLegacyText(originalValue, locale);
+  const translatedAlternateValue = translateLegacyText(originalValue, getAlternateLocale(locale));
 
-  if (locale === 'zh-CN') {
-    if (options.restoreOriginal) {
-      if (currentValue !== originalValue) {
-        element.setAttribute(attributeName, originalValue);
-      }
-      return;
-    }
-
-    if (currentValue !== originalValue) {
-      originalValues.set(attributeName, currentValue);
-    }
+  if (currentValue === translatedOriginalValue) {
     return;
   }
 
-  const translatedOriginalValue = translateLegacyText(originalValue, locale);
-  if (currentValue === translatedOriginalValue) {
+  if (currentValue === translatedAlternateValue) {
+    element.setAttribute(attributeName, translatedOriginalValue);
     return;
   }
 
@@ -155,25 +144,34 @@ const translateAttributeValue = (
 
 const translateElementAttributes = (
   element: Element,
-  locale: 'zh-CN' | 'en-US',
-  options: TranslationOptions = {},
+  locale: LegacyLocale,
 ) => {
-  if (element.closest(TEXT_SKIP_SELECTOR)) {
+  if (element.matches(ATTRIBUTE_SKIP_SELECTOR)) {
     return;
   }
 
   ATTRIBUTE_NAMES.forEach((attributeName) => {
-    translateAttributeValue(element, attributeName, locale, options);
+    translateAttributeValue(element, attributeName, locale);
   });
+};
+
+const walkAndTranslateAttributesOnly = (
+  root: Element,
+  locale: LegacyLocale,
+) => {
+  translateElementAttributes(root, locale);
+
+  for (const childElement of Array.from(root.children)) {
+    walkAndTranslateAttributesOnly(childElement, locale);
+  }
 };
 
 const walkAndTranslate = (
   root: Node,
-  locale: 'zh-CN' | 'en-US',
-  options: TranslationOptions = {},
+  locale: LegacyLocale,
 ) => {
   if (root.nodeType === Node.TEXT_NODE) {
-    translateTextNode(root as Text, locale, options);
+    translateTextNode(root as Text, locale);
     return;
   }
 
@@ -183,13 +181,14 @@ const walkAndTranslate = (
 
   const element = root as Element;
   if (element.matches(TEXT_SKIP_SELECTOR)) {
+    walkAndTranslateAttributesOnly(element, locale);
     return;
   }
 
-  translateElementAttributes(element, locale, options);
+  translateElementAttributes(element, locale);
 
   for (const childNode of Array.from(element.childNodes)) {
-    walkAndTranslate(childNode, locale, options);
+    walkAndTranslate(childNode, locale);
   }
 };
 
@@ -202,7 +201,7 @@ export const useLegacyDomTranslation = () => {
       return;
     }
 
-    walkAndTranslate(document.body, localeStore.locale, { restoreOriginal: true });
+    walkAndTranslate(document.body, localeStore.locale);
   };
 
   onMounted(() => {

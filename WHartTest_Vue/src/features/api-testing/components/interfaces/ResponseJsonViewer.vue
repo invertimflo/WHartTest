@@ -4,6 +4,7 @@ import { IconCopy, IconClose, IconPlayArrow } from '@arco-design/web-vue/es/icon
 import { useClipboard } from '@vueuse/core'
 import { Message } from '@arco-design/web-vue'
 import jmespath from 'jmespath'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 interface Props {
   visible: boolean
@@ -13,6 +14,55 @@ interface Props {
 
 const props = defineProps<Props>()
 const emit = defineEmits(['update:visible', 'select-path'])
+const { isEnglish } = useAppI18n()
+
+const viewerModeLabel = computed(() => (
+  props.fieldType === 'extract'
+    ? (isEnglish.value ? 'Extractor' : '提取器')
+    : (isEnglish.value ? 'Assertion' : '断言')
+))
+
+const pathActionLabel = computed(() => (
+  props.fieldType === 'extract'
+    ? (isEnglish.value ? 'Select' : '选择')
+    : (isEnglish.value ? 'Assert' : '断言')
+))
+
+const guideExpressionLabel = computed(() => (
+  props.fieldType === 'extract'
+    ? (isEnglish.value ? 'extract' : '提取')
+    : (isEnglish.value ? 'assert' : '断言')
+))
+
+const guideTargetLabel = computed(() => (
+  props.fieldType === 'extract'
+    ? (isEnglish.value ? 'extract rules' : '提取规则')
+    : (isEnglish.value ? 'assert config' : '断言配置')
+))
+
+const viewerTitle = computed(() => (
+  `${isEnglish.value ? 'Response Data' : '响应数据'} - ${viewerModeLabel.value}`
+))
+
+const guideTitle = computed(() => (
+  isEnglish.value ? 'Guide' : '使用说明'
+))
+
+const guideLines = computed(() => ([
+  isEnglish.value
+    ? 'Click the arrow before an object or array to expand or collapse it'
+    : '点击对象或数组前的箭头可以展开/折叠节点',
+  isEnglish.value
+    ? `Click the "${pathActionLabel.value}" button next to a value to test that path`
+    : `点击值后面的"${pathActionLabel.value}"按钮可以选择该路径进行测试`,
+  isEnglish.value
+    ? `Use the test area to try ${guideExpressionLabel.value} expressions, then apply them to the ${guideTargetLabel.value}`
+    : `使用测试区域可以调试${guideExpressionLabel.value}表达式，测试成功后可应用到${guideTargetLabel.value}中`,
+  isEnglish.value
+    ? 'Selected paths are automatically converted to JMESPath expressions'
+    : '选择的路径会自动转换为JMESPath表达式',
+  isEnglish.value ? 'Path format example:' : '路径格式示例:',
+]))
 
 // 复制功能
 const { copy } = useClipboard()
@@ -392,7 +442,7 @@ watch(() => props.visible, (visible) => {
   >
     <template #title>
       <div class="flex justify-between items-center">
-        <span>响应数据 - {{ fieldType === 'extract' ? '提取器' : '断言' }}</span>
+        <span>{{ viewerTitle }}</span>
         <a-button type="text" @click="closeDrawer">
           <template #icon><icon-close /></template>
         </a-button>
@@ -467,13 +517,13 @@ watch(() => props.visible, (visible) => {
       <a-empty v-else description="暂无响应数据" />
       
       <div class="viewer-guide mt-4 rounded-lg p-4">
-        <h3 class="viewer-guide-title font-medium mb-2">使用说明</h3>
+        <h3 class="viewer-guide-title font-medium mb-2">{{ guideTitle }}</h3>
         <ul class="viewer-guide-list text-sm list-disc pl-4">
-          <li class="mb-1">点击对象或数组前的箭头可以展开/折叠节点</li>
-          <li class="mb-1">点击值后面的"{{ fieldType === 'extract' ? '选择' : '断言' }}"按钮可以选择该路径进行测试</li>
-          <li class="mb-1">使用测试区域可以调试{{ fieldType === 'extract' ? '提取' : '断言' }}表达式，测试成功后可应用到{{ fieldType === 'extract' ? '提取规则' : '断言配置' }}中</li>
-          <li class="mb-1">选择的路径会自动转换为JMESPath表达式</li>
-          <li>路径格式示例: <code class="viewer-guide-code px-1 py-0.5 rounded">body.data.users[0].name</code></li>
+          <li class="mb-1">{{ guideLines[0] }}</li>
+          <li class="mb-1">{{ guideLines[1] }}</li>
+          <li class="mb-1">{{ guideLines[2] }}</li>
+          <li class="mb-1">{{ guideLines[3] }}</li>
+          <li>{{ guideLines[4] }} <code class="viewer-guide-code px-1 py-0.5 rounded">body.data.users[0].name</code></li>
         </ul>
       </div>
     </div>
