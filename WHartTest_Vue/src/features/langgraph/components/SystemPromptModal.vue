@@ -561,7 +561,8 @@ const handleInitializePrompts = async () => {
     }
 
     // 执行初始化
-    const response = await initializeUserPrompts(forceUpdate);
+    const language: 'zh' | 'en' = isEnglish.value ? 'en' : 'zh';
+    const response = await initializeUserPrompts(forceUpdate, language);
     if (response.status === 'success') {
       const data = response.data;
       const createdCount = data.summary?.created_count || 0;

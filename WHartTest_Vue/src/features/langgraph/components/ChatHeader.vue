@@ -20,6 +20,7 @@
             style="width: 160px"
             allow-clear
             @change="handlePromptChange"
+            @popup-visible-change="handleDropdownVisibleChange"
             :loading="promptsLoading"
             :fallback-option="false"
           >
@@ -240,6 +241,13 @@ const loadUserPrompts = async () => {
 const handlePromptChange = (promptId: number | null) => {
   selectedPromptId.value = promptId;
   emit('update:selected-prompt-id', promptId);
+};
+
+// 每次展开下拉时拉取最新数据，避免初始化语言切换/管理操作后看到旧列表
+const handleDropdownVisibleChange = (visible: boolean) => {
+  if (visible) {
+    loadUserPrompts();
+  }
 };
 
 // 处理知识库开关变化
