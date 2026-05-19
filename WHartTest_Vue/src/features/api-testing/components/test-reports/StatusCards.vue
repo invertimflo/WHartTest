@@ -59,7 +59,6 @@
             stroke-width="7"
             :stroke="progressTrackColor"
             fill="none"
-            class="stroke-current"
           />
           <circle
             cx="40"
@@ -68,7 +67,7 @@
             stroke-width="7"
             :stroke="progressColor"
             fill="none"
-            class="stroke-current"
+            stroke-linecap="round"
             :style="{
               strokeDasharray: `${2 * Math.PI * 34}`,
               strokeDashoffset: `${2 * Math.PI * 34 * (1 - (report?.success_rate || 0))}`,
@@ -114,20 +113,26 @@ const props = defineProps<{
 
 const themeStore = useThemeStore()
 
+const reportStatus = computed(() => props.report?.status)
+
 const progressColor = computed(() => {
+  if (reportStatus.value === 'success') return '#22c55e'
+  if (reportStatus.value === 'failure') return '#ef4444'
+  if (reportStatus.value === 'error') return '#f97316'
+
   const rate = props.report?.success_rate || 0
-  if (rate >= 0.9) return '#22c55e' // 绿色
-  if (rate >= 0.7) return '#f97316' // 橙色
-  return '#ef4444' // 红色
+  return rate > 0 ? '#22c55e' : '#ef4444'
 })
 
 const progressTrackColor = computed(() => themeStore.isBlack ? 'rgba(75, 85, 99, 0.3)' : 'rgba(148, 163, 184, 0.28)')
 
 const progressTextColor = computed(() => {
+  if (reportStatus.value === 'success') return 'text-green-500'
+  if (reportStatus.value === 'failure') return 'text-red-500'
+  if (reportStatus.value === 'error') return 'text-orange-500'
+
   const rate = props.report?.success_rate || 0
-  if (rate >= 0.9) return 'text-green-500'
-  if (rate >= 0.7) return 'text-orange-500'
-  return 'text-red-500'
+  return rate > 0 ? 'text-green-500' : 'text-red-500'
 })
 </script>
 
