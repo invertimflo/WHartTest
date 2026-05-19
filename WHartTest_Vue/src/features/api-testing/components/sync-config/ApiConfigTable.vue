@@ -119,9 +119,9 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
       </template>
 
       <template #sync_fields="{ record }">
-        <div class="flex flex-col gap-2">
+        <div class="flex flex-col items-center justify-center gap-2 min-h-[56px]">
           <!-- 第一行：请求相关字段 -->
-          <div class="flex flex-wrap gap-1.5">
+          <div class="flex flex-wrap justify-center gap-1.5">
             <template v-for="field in record.sync_fields" :key="field">
               <a-tag
                 v-if="['method', 'url', 'headers', 'params', 'body'].includes(field)"
@@ -134,7 +134,7 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
             </template>
           </div>
           <!-- 第二行：钩子和其他字段 -->
-          <div class="flex flex-wrap gap-1.5">
+          <div class="flex flex-wrap justify-center gap-1.5">
             <template v-for="field in record.sync_fields" :key="field">
               <a-tag
                 v-if="['setup_hooks', 'teardown_hooks', 'variables', 'validators', 'extract'].includes(field)"

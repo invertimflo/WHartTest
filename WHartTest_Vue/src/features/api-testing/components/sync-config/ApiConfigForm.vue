@@ -51,6 +51,25 @@ const formModel = reactive<FormModel>({
   }
 })
 
+const resetForm = () => {
+  isLoadingStepsFromConfig.value = false
+  formModel.name = ''
+  formModel.description = ''
+  formModel.interface = undefined
+  formModel.testcase = undefined
+  formModel.step = undefined
+  formModel.sync_fields = []
+  formModel.sync_enabled = true
+  formModel.sync_mode = 'manual'
+  formModel.sync_trigger.fields_to_watch = []
+  teststeps.value = []
+}
+
+const modalVisible = computed({
+  get: () => props.visible,
+  set: (value: boolean) => emit('update:visible', value)
+})
+
 // 添加接口、用例和步骤的列表数据
 const interfaces = ref<ApiInterface[]>([])
 const testcases = ref<TestCase[]>([])
@@ -74,7 +93,7 @@ const fetchInterfaces = async () => {
   try {
     loadingInterfaces.value = true
     const { data } = await syncApi.getInterfaces(projectStore.currentProject.id)
-    interfaces.value = data.results
+    interfaces.value = Array.isArray(data.results) ? data.results : []
   } catch (error) {
     Message.error('获取接口列表失败')
     console.error(error)
@@ -93,7 +112,7 @@ const fetchTestCases = async () => {
   try {
     loadingTestcases.value = true
     const { data } = await syncApi.getTestCases(projectStore.currentProject.id)
-    testcases.value = data.results
+    testcases.value = Array.isArray(data.results) ? data.results : []
   } catch (error) {
     Message.error('获取用例列表失败')
     console.error(error)
@@ -229,11 +248,13 @@ watch(() => props.currentConfig, async (newConfig) => {
 
 // 监听visible变化，当弹窗打开时获取数据
 watch(() => props.visible, (newVisible) => {
-  if (newVisible && !props.isEditing) {
-    // 只有在新建模式下才初始化加载数据
-    // 编辑模式下的数据加载由currentConfig的watch处理
-    fetchInterfaces();
-    fetchTestCases();
+  if (newVisible) {
+    if (!props.isEditing) {
+      fetchInterfaces()
+      fetchTestCases()
+    }
+  } else {
+    resetForm()
   }
 }, { immediate: true })
 
@@ -257,31 +278,6 @@ const handleSubmit = () => {
   })
 }
 
-const handleClose = () => {
-  // 先发送关闭事件
-  emit('update:visible', false)
-  
-  // 重置标志位
-  isLoadingStepsFromConfig.value = false;
-  
-  // 延迟重置表单数据，确保弹窗已关闭
-  setTimeout(() => {
-    // 重置表单数据
-    formModel.name = '';
-    formModel.description = '';
-    formModel.interface = undefined;
-    formModel.testcase = undefined;
-    formModel.step = undefined;
-    formModel.sync_fields = [];
-    formModel.sync_enabled = true;
-    formModel.sync_mode = 'manual';
-    formModel.sync_trigger.fields_to_watch = [];
-    
-    // 清空步骤列表
-    teststeps.value = [];
-  }, 200);
-}
-
 defineExpose({
   formModel
 })
@@ -289,13 +285,11 @@ defineExpose({
 
 <template>
   <a-modal
-    :visible="visible"
+    v-model:visible="modalVisible"
     :title="isEditing ? '编辑同步配置' : '新建同步配置'"
     :width="780"
     :modal-class="isDarkTheme ? 'api-config-form-modal api-config-form-modal--dark' : 'api-config-form-modal api-config-form-modal--light'"
     @ok="handleSubmit"
-    @cancel="handleClose"
-    @close="handleClose"
   >
     <a-form :model="formModel" layout="vertical">
       <a-form-item field="name" label="配置名称" required>

@@ -95,6 +95,16 @@ function _wrapList(res: any): { data: { results: any[]; count: number }; status:
   return { data: { results, count }, status: 'success', message: '' };
 }
 
+function _wrapOne<T = any>(res: any): { data: T | null; status: 'success'; message: string } {
+  if (!res.success) {
+    const err: any = new Error(res.error || res.message || '操作失败');
+    err.errors = res.errors;
+    throw err;
+  }
+
+  return { data: res.data ?? null, status: 'success', message: '' };
+}
+
 // Type aliases for component imports
 export type SyncConfig = ApiGlobalSyncConfig & Record<string, any>;
 export type SyncHistory = ApiSyncHistory & Record<string, any>;
@@ -114,19 +124,19 @@ export const syncApi = {
   createConfig: async (data: any) => {
     const pid = data.project ? Number(data.project) : _pid();
     delete data.project;
-    return syncService.createGlobalConfig(pid, data);
+    return _wrapOne(await syncService.createGlobalConfig(pid, data));
   },
   updateConfig: async (id: number, data: any) => {
     const pid = _pid();
-    return syncService.updateGlobalConfig(pid, id, data);
+    return _wrapOne(await syncService.updateGlobalConfig(pid, id, data));
   },
   deleteConfig: async (id: number) => {
     const pid = _pid();
-    return syncService.deleteGlobalConfig(pid, id);
+    return _wrapOne(await syncService.deleteGlobalConfig(pid, id));
   },
   setActiveConfig: async (id: number) => {
     const pid = _pid();
-    return syncService.setActive(pid, id);
+    return _wrapOne(await syncService.setActive(pid, id));
   },
 
   // --- Sync History ---
@@ -137,11 +147,11 @@ export const syncApi = {
   },
   getHistoryDetail: async (id: number): Promise<any> => {
     const pid = _pid();
-    return syncService.getHistory(pid, id);
+    return _wrapOne(await syncService.getHistory(pid, id));
   },
   rollbackHistory: async (id: number) => {
     const pid = _pid();
-    return syncService.rollback(pid, id);
+    return _wrapOne(await syncService.rollback(pid, id));
   },
 
   // --- API Sync Configs (per-interface configs) ---
@@ -150,37 +160,43 @@ export const syncApi = {
   },
   getConfigDetail: async (id: number) => {
     const pid = _pid();
-    return syncService.getConfig(pid, id);
+    return _wrapOne(await syncService.getConfig(pid, id));
   },
   createApiConfig: async (data: any) => {
     const pid = _pid();
-    return syncService.createConfig(pid, data);
+    return _wrapOne(await syncService.createConfig(pid, data));
   },
   updateApiConfig: async (id: number, data: any) => {
     const pid = _pid();
-    return syncService.updateConfig(pid, id, data);
+    return _wrapOne(await syncService.updateConfig(pid, id, data));
   },
   deleteApiConfig: async (id: number) => {
     const pid = _pid();
-    return syncService.deleteConfig(pid, id);
+    return _wrapOne(await syncService.deleteConfig(pid, id));
   },
   syncNowConfig: async (id: number) => {
     const pid = _pid();
-    return syncService.syncNow(pid, id);
+    return _wrapOne(await syncService.syncNow(pid, id));
   },
 
   // --- Helpers for ApiConfigForm (interface/testcase/step lists) ---
   getInterfaces: async (projectId: number) => {
-    const res = await request<any>({ url: `/projects/${projectId}/api-interfaces/`, method: 'GET', params: { page_size: 1000 } });
-    return { data: { results: res.data ?? [] } };
+    return _wrapList(await request<any>({
+      url: `/projects/${projectId}/api-interfaces/`,
+      method: 'GET',
+      params: { page_size: 1000 }
+    }));
   },
   getTestCases: async (projectId: number) => {
-    const res = await request<any>({ url: `/projects/${projectId}/api-testcases/`, method: 'GET', params: { page_size: 1000 } });
-    return { data: { results: res.data ?? [] } };
+    return _wrapList(await request<any>({
+      url: `/projects/${projectId}/api-testcases/`,
+      method: 'GET',
+      params: { page_size: 1000 }
+    }));
   },
   getTestSteps: async (testcaseId: number) => {
     const pid = _pid();
-    const res = await request<any>({ url: `/projects/${pid}/api-testcases/${testcaseId}/`, method: 'GET' });
+    const res = _wrapOne(await request<any>({ url: `/projects/${pid}/api-testcases/${testcaseId}/`, method: 'GET' }));
     return { data: { steps: res.data?.steps ?? [] } };
   },
 };

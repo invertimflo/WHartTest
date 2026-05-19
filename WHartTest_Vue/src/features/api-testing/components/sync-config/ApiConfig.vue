@@ -58,43 +58,32 @@ const fetchConfigs = async () => {
 
 const handleEdit = async (record: ApiSyncConfig) => {
   try {
-    // 确保先关闭已打开的窗口
-    showCreateModal.value = false;
-    showDetailModal.value = false;
-    
-    // 重置状态
-    currentConfig.value = null;
-    isEditing.value = true;
-    editingConfigId.value = record.id;
-    
-    loading.value = true;
-    console.log('获取配置详情，ID:', record.id);
-    const response = await syncApi.getConfigDetail(record.id);
-    
-    // 确保我们使用的是响应中的data字段
-    const configData = response.data;
-    console.log('获取到的配置详情(原始):', configData);
-    
-    // 打印关键字段，帮助调试
-    console.log('接口ID:', (configData as any).interface);
-    console.log('用例ID:', (configData as any).testcase);
-    console.log('步骤ID:', (configData as any).step);
-    console.log('接口信息:', (configData as any).interface_info);
-    console.log('用例信息:', (configData as any).testcase_info);
-    console.log('步骤信息:', (configData as any).step_info);
-    
-    // 设置配置数据
-    currentConfig.value = configData;
-    
-    // 延迟打开弹窗，确保之前的弹窗已关闭
-    setTimeout(() => {
-      showCreateModal.value = true;
-    }, 100);
+    showCreateModal.value = false
+    showDetailModal.value = false
+    currentConfig.value = null
+    isEditing.value = true
+    editingConfigId.value = record.id
+
+    loading.value = true
+    console.log('获取配置详情，ID:', record.id)
+    const response = await syncApi.getConfigDetail(record.id)
+    const configData = response.data
+
+    console.log('获取到的配置详情(原始):', configData)
+    console.log('接口ID:', (configData as any).interface)
+    console.log('用例ID:', (configData as any).testcase)
+    console.log('步骤ID:', (configData as any).step)
+    console.log('接口信息:', (configData as any).interface_info)
+    console.log('用例信息:', (configData as any).testcase_info)
+    console.log('步骤信息:', (configData as any).step_info)
+
+    currentConfig.value = configData
+    showCreateModal.value = true
   } catch (error) {
-    Message.error('获取配置详情失败');
-    console.error(error);
+    Message.error('获取配置详情失败')
+    console.error(error)
   } finally {
-    loading.value = false;
+    loading.value = false
   }
 }
 
@@ -132,32 +121,22 @@ const handleSubmit = async (formData: any) => {
 
 const handleViewDetail = async (record: ApiSyncConfig) => {
   try {
-    // 确保先关闭已打开的窗口
-    showCreateModal.value = false;
-    showDetailModal.value = false;
-    
-    // 重置状态
-    currentConfig.value = null;
-    
-    loading.value = true;
-    const response = await syncApi.getConfigDetail(record.id);
-    
-    // 确保我们使用的是响应中的data字段
-    const configData = response.data;
-    console.log('查看详情，获取到的配置:', configData);
-    
-    // 设置配置数据
-    currentConfig.value = configData;
-    
-    // 延迟打开弹窗，确保之前的弹窗已关闭
-    setTimeout(() => {
-      showDetailModal.value = true;
-    }, 100);
+    showCreateModal.value = false
+    showDetailModal.value = false
+    currentConfig.value = null
+
+    loading.value = true
+    const response = await syncApi.getConfigDetail(record.id)
+    const configData = response.data
+    console.log('查看详情，获取到的配置:', configData)
+
+    currentConfig.value = configData
+    showDetailModal.value = true
   } catch (error) {
-    Message.error('获取配置详情失败');
-    console.error(error);
+    Message.error('获取配置详情失败')
+    console.error(error)
   } finally {
-    loading.value = false;
+    loading.value = false
   }
 }
 
@@ -251,19 +230,12 @@ const handlePageSizeChange = (size: number) => {
 
 // 处理新建配置
 const handleCreate = () => {
-  // 确保先关闭已打开的窗口
-  showCreateModal.value = false;
-  showDetailModal.value = false;
-  
-  // 重置状态
-  currentConfig.value = null;
-  isEditing.value = false;
-  editingConfigId.value = null;
-  
-  // 延迟打开弹窗，确保之前的弹窗已关闭
-  setTimeout(() => {
-    showCreateModal.value = true;
-  }, 100);
+  showCreateModal.value = false
+  showDetailModal.value = false
+  currentConfig.value = null
+  isEditing.value = false
+  editingConfigId.value = null
+  showCreateModal.value = true
 }
 
 // 监听项目变化
