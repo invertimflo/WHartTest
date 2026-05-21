@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import {
@@ -22,12 +23,46 @@ import {
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 const globalHeaders = ref<GlobalHeader[]>([])
 const loading = ref(false)
 const showCreateModal = ref(false)
 const showEditModal = ref(false)
 const formLoading = ref(false)
+
+const panelText = computed(() => isEnglish.value
+  ? {
+      infoLine1: 'Global headers apply automatically to all interfaces and test cases in the project',
+      variableReferencePrefix: 'You can use',
+      variableReferenceConnector: 'or',
+      variableReferenceSuffix: 'to reference environment variables in header values',
+      variableReferenceShort: '$variableName',
+      variableReferenceBraced: '${variableName}',
+      infoLine3: 'If duplicate header names exist, interface headers take precedence over global headers',
+      headerList: 'Header List',
+      addHeader: 'Add Header',
+      edit: 'Edit',
+      delete: 'Delete',
+      emptyTitle: 'No global headers yet',
+      emptyDescription: 'You can add global headers that will be applied to all API requests',
+    }
+  : {
+      infoLine1: '全局请求头会自动应用于所属项目的所有接口和测试用例',
+      variableReferencePrefix: '您可以在值中使用',
+      variableReferenceConnector: '或',
+      variableReferenceSuffix: '引用环境变量',
+      variableReferenceShort: '$变量名',
+      variableReferenceBraced: '${变量名}',
+      infoLine3: '如果出现同名请求头，接口定义的请求头优先级更高（不会被全局配置覆盖）',
+      headerList: '请求头列表',
+      addHeader: '添加请求头',
+      edit: '编辑',
+      delete: '删除',
+      emptyTitle: '暂无全局请求头',
+      emptyDescription: '您可以添加全局请求头，这些请求头将应用于所有接口请求',
+    }
+)
 
 // 表单数据
 const formData = ref<CreateGlobalHeaderData>({
@@ -343,22 +378,28 @@ defineExpose({
     <div class="info-card p-4 text-sm space-y-2 mb-4 rounded-lg flex-shrink-0">
       <div class="flex items-start gap-2">
         <icon-info-circle class="text-blue-400 mt-0.5 flex-shrink-0" />
-        <div>全局请求头会自动应用于所属项目的所有接口和测试用例</div>
+        <div>{{ panelText.infoLine1 }}</div>
       </div>
       <div class="flex items-start gap-2">
         <icon-code class="text-teal-400 mt-0.5 flex-shrink-0" />
-        <div>您可以在值中使用 <code class="inline-code px-1 py-0.5 rounded">$变量名</code> 或 <code class="inline-code px-1 py-0.5 rounded">${变量名}</code> 引用环境变量</div>
+        <div>
+          {{ panelText.variableReferencePrefix }}
+          <code class="inline-code px-1 py-0.5 rounded">{{ panelText.variableReferenceShort }}</code>
+          {{ panelText.variableReferenceConnector }}
+          <code class="inline-code px-1 py-0.5 rounded">{{ panelText.variableReferenceBraced }}</code>
+          {{ panelText.variableReferenceSuffix }}
+        </div>
       </div>
       <div class="flex items-start gap-2">
         <icon-exclamation-circle class="text-amber-400 mt-0.5 flex-shrink-0" />
-        <div>如果出现同名请求头，接口定义的请求头优先级更高（不会被全局配置覆盖）</div>
+        <div>{{ panelText.infoLine3 }}</div>
       </div>
     </div>
 
     <!-- 请求头列表标题 -->
     <div class="flex items-center gap-2 mb-4 flex-shrink-0">
       <icon-code class="panel-title-icon" />
-      <span class="panel-title-text font-medium">请求头列表</span>
+      <span class="panel-title-text font-medium">{{ panelText.headerList }}</span>
       
       <a-button 
         size="mini" 
@@ -369,7 +410,7 @@ defineExpose({
         <template #icon>
           <icon-plus class="panel-action-icon" />
         </template>
-        添加请求头
+        {{ panelText.addHeader }}
       </a-button>
     </div>
 
@@ -437,7 +478,7 @@ defineExpose({
                   @click.stop="handleEdit(header)"
                 >
                   <template #icon><icon-edit /></template>
-                  编辑
+                  {{ panelText.edit }}
                 </a-button>
                 <a-button
                   type="text"
@@ -446,7 +487,7 @@ defineExpose({
                   @click.stop="handleDelete(header)"
                 >
                   <template #icon><icon-delete /></template>
-                  删除
+                  {{ panelText.delete }}
                 </a-button>
               </div>
             </div>
@@ -468,13 +509,13 @@ defineExpose({
                   <icon-code class="text-teal-400 text-2xl" />
                 </div>
               </div>
-              <div class="empty-state-title text-base mb-2">暂无全局请求头</div>
+              <div class="empty-state-title text-base mb-2">{{ panelText.emptyTitle }}</div>
               <div class="empty-state-description text-sm mb-6 max-w-md mx-auto">
-                您可以添加全局请求头，这些请求头将应用于所有接口请求
+                {{ panelText.emptyDescription }}
               </div>
               <a-button type="outline" @click="handleCreate">
                 <template #icon><icon-plus /></template>
-                添加请求头
+                {{ panelText.addHeader }}
               </a-button>
             </div>
           </div>

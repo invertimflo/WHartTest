@@ -3,9 +3,11 @@ import { computed } from 'vue'
 import { IconEmpty, IconPlus } from '@arco-design/web-vue/es/icon'
 import type { TableColumnData } from '@arco-design/web-vue'
 import type { ApiSyncConfig } from '../../services/syncService'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useThemeStore } from '@/store/themeStore'
 
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 
 const props = defineProps<{
@@ -24,62 +26,111 @@ const emit = defineEmits<{
   (e: 'create'): void
 }>()
 
-const columns: TableColumnData[] = [
+const text = computed(() => isEnglish.value
+  ? {
+      index: 'No.',
+      interfaceName: 'Interface Name',
+      testCaseName: 'Test Case Name',
+      stepName: 'Step Name',
+      syncFields: 'Sync Fields',
+      syncMode: 'Sync Mode',
+      autoSync: 'Auto Sync',
+      manualSync: 'Manual Sync',
+      status: 'Status',
+      createdInfo: 'Created Info',
+      operations: 'Actions',
+      emptyConfigs: 'No sync configs yet',
+      createConfig: 'Create Config',
+      enabled: 'Enabled',
+      disabled: 'Disabled',
+      createdBy: 'Created by:',
+      createdAt: 'Created at:',
+      sync: 'Sync',
+      edit: 'Edit',
+      details: 'Details',
+      delete: 'Delete',
+    }
+  : {
+      index: '序号',
+      interfaceName: '接口名称',
+      testCaseName: '用例名称',
+      stepName: '步骤名称',
+      syncFields: '同步字段',
+      syncMode: '同步模式',
+      autoSync: '自动同步',
+      manualSync: '手动同步',
+      status: '状态',
+      createdInfo: '创建信息',
+      operations: '操作',
+      emptyConfigs: '暂无同步配置',
+      createConfig: '新建配置',
+      enabled: '已启用',
+      disabled: '已禁用',
+      createdBy: '创建者：',
+      createdAt: '时间：',
+      sync: '同步',
+      edit: '编辑',
+      details: '详情',
+      delete: '删除',
+    }
+)
+
+const columns = computed<TableColumnData[]>(() => [
   {
-    title: '序号',
-    width: 60,
+    title: text.value.index,
+    width: 70,
     align: 'center',
     slotName: 'index'
   },
   {
-    title: '接口名称',
-    width: 150,
+    title: text.value.interfaceName,
+    width: isEnglish.value ? 170 : 150,
     align: 'center',
     render: ({ record }) => record.interface_info?.name || '-'
   },
   {
-    title: '用例名称',
-    width: 150,
+    title: text.value.testCaseName,
+    width: isEnglish.value ? 170 : 150,
     align: 'center',
     render: ({ record }) => record.testcase_info?.name || '-'
   },
   {
-    title: '步骤名称',
-    width: 150,
+    title: text.value.stepName,
+    width: isEnglish.value ? 160 : 150,
     align: 'center',
     render: ({ record }) => record.step_info?.name || '-'
   },
   {
-    title: '同步字段',
-    width: 390,
+    title: text.value.syncFields,
+    width: isEnglish.value ? 420 : 390,
     align: 'center',
     slotName: 'sync_fields'
   },
   {
-    title: '同步模式',
-    width: 100,
+    title: text.value.syncMode,
+    width: isEnglish.value ? 120 : 100,
     align: 'center',
-    render: ({ record }) => record.sync_mode === 'auto' ? '自动同步' : '手动同步'
+    render: ({ record }) => record.sync_mode === 'auto' ? text.value.autoSync : text.value.manualSync
   },
   {
-    title: '状态',
-    width: 60,
+    title: text.value.status,
+    width: isEnglish.value ? 90 : 60,
     align: 'center',
     slotName: 'status'
   },
   {
-    title: '创建信息',
-    width: 210,
+    title: text.value.createdInfo,
+    width: isEnglish.value ? 250 : 210,
     align: 'center',
     slotName: 'created_info'
   },
   {
-    title: '操作',
-    width: 120,
+    title: text.value.operations,
+    width: isEnglish.value ? 150 : 120,
     align: 'center',
     slotName: 'operations'
   }
-]
+])
 
 const handleSelectionChange = (selectedKeys: (string | number)[]) => {
   emit('update:selectedRowKeys', selectedKeys.map(key => Number(key)))
@@ -108,12 +159,12 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
       <template #empty>
         <div class="flex flex-col items-center justify-center py-16">
           <icon-empty class="empty-icon w-16 h-16 mb-4" />
-          <div class="empty-text mb-4">暂无同步配置</div>
+          <div class="empty-text mb-4">{{ text.emptyConfigs }}</div>
           <a-button type="outline" size="large" @click="emit('create')">
             <template #icon>
               <icon-plus />
             </template>
-            新建配置
+            {{ text.createConfig }}
           </a-button>
         </div>
       </template>
@@ -155,18 +206,18 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
           size="medium"
           class="rounded-md"
         >
-          {{ record.sync_enabled ? '已启用' : '已禁用' }}
+          {{ record.sync_enabled ? text.enabled : text.disabled }}
         </a-tag>
       </template>
 
       <template #created_info="{ record }">
         <div class="flex flex-col gap-1 text-sm">
           <div class="flex items-center gap-1">
-            <span class="config-meta-label">创建者：</span>
+            <span class="config-meta-label">{{ text.createdBy }}</span>
             <span>{{ record.created_by_info?.username || '-' }}</span>
           </div>
           <div class="flex items-center gap-1">
-            <span class="config-meta-label">时间：</span>
+            <span class="config-meta-label">{{ text.createdAt }}</span>
             <span>{{ record.created_at ? new Date(record.created_at).toLocaleString() : '-' }}</span>
           </div>
         </div>
@@ -185,7 +236,7 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
             :loading="loading"
             @click="emit('sync', record)"
           >
-            同步
+            {{ text.sync }}
           </a-button>
           <a-button
             type="text"
@@ -194,7 +245,7 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
             :loading="loading"
             @click="emit('edit', record)"
           >
-            编辑
+            {{ text.edit }}
           </a-button>
           <a-button
             type="text"
@@ -203,7 +254,7 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
             :loading="loading"
             @click="emit('view', record)"
           >
-            详情
+            {{ text.details }}
           </a-button>
           <a-button
             type="text"
@@ -213,7 +264,7 @@ const handleSelectionChange = (selectedKeys: (string | number)[]) => {
             :loading="loading"
             @click="emit('delete', record)"
           >
-            删除
+            {{ text.delete }}
           </a-button>
         </div>
       </template>

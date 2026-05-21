@@ -6,9 +6,9 @@
         <icon-check-circle class="text-[30px] text-green-500/80" />
       </div>
       <div class="status-card__body">
-        <p class="status-card__label text-green-400">成功步骤</p>
+        <p class="status-card__label text-green-400">{{ text.passedSteps }}</p>
         <h3 class="status-card__value text-green-500">{{ report?.success_count }}</h3>
-        <p class="status-card__meta">占比 {{ Math.round(Number(report?.success_rate || 0) * 100) }}%</p>
+        <p class="status-card__meta">{{ formatShare(Math.round(Number(report?.success_rate || 0) * 100)) }}</p>
       </div>
     </div>
 
@@ -18,9 +18,9 @@
         <icon-close-circle class="text-[30px] text-red-500/80" />
       </div>
       <div class="status-card__body">
-        <p class="status-card__label text-red-400">失败步骤</p>
+        <p class="status-card__label text-red-400">{{ text.failedSteps }}</p>
         <h3 class="status-card__value text-red-500">{{ report?.fail_count }}</h3>
-        <p class="status-card__meta">占比 {{ failRate }}%</p>
+        <p class="status-card__meta">{{ formatShare(failRate) }}</p>
       </div>
     </div>
 
@@ -30,9 +30,9 @@
         <icon-exclamation-circle class="text-[30px] text-orange-500/80" />
       </div>
       <div class="status-card__body">
-        <p class="status-card__label text-orange-400">错误步骤</p>
+        <p class="status-card__label text-orange-400">{{ text.errorSteps }}</p>
         <h3 class="status-card__value text-orange-500">{{ report?.error_count }}</h3>
-        <p class="status-card__meta">占比 {{ errorRate }}%</p>
+        <p class="status-card__meta">{{ formatShare(errorRate) }}</p>
       </div>
     </div>
 
@@ -42,9 +42,9 @@
         <icon-list class="text-[30px] text-blue-500/80" />
       </div>
       <div class="status-card__body">
-        <p class="status-card__label text-blue-400">总步骤</p>
+        <p class="status-card__label text-blue-400">{{ text.totalSteps }}</p>
         <h3 class="status-card__value text-blue-500">{{ totalSteps }}</h3>
-        <p class="status-card__meta">执行完成</p>
+        <p class="status-card__meta">{{ text.completed }}</p>
       </div>
     </div>
 
@@ -79,15 +79,15 @@
           <span class="text-lg font-bold" :class="progressTextColor">
             {{ Math.round((report?.success_rate || 0) * 100) }}%
           </span>
-          <span class="text-[11px] text-gray-400">成功率</span>
+          <span class="text-[11px] text-gray-400">{{ text.successRate }}</span>
         </div>
       </div>
       <div class="status-card__body">
-        <p class="status-card__label" :class="progressTextColor">通过率</p>
+        <p class="status-card__label" :class="progressTextColor">{{ text.passRate }}</p>
         <h3 class="status-card__value" :class="progressTextColor">
           {{ Math.round((report?.success_rate || 0) * 100) }}%
         </h3>
-        <p class="status-card__meta">测试通过率</p>
+        <p class="status-card__meta">{{ text.testPassRate }}</p>
       </div>
     </div>
   </div>
@@ -95,6 +95,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useThemeStore } from '@/store/themeStore'
 import { 
   IconCheckCircle,
@@ -112,8 +113,36 @@ const props = defineProps<{
 }>()
 
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 
 const reportStatus = computed(() => props.report?.status)
+
+const text = computed(() => isEnglish.value
+  ? {
+      passedSteps: 'Passed Steps',
+      failedSteps: 'Failed Steps',
+      errorSteps: 'Error Steps',
+      totalSteps: 'Total Steps',
+      completed: 'Completed',
+      successRate: 'Success rate',
+      passRate: 'Pass Rate',
+      testPassRate: 'Test Pass Rate',
+    }
+  : {
+      passedSteps: '成功步骤',
+      failedSteps: '失败步骤',
+      errorSteps: '错误步骤',
+      totalSteps: '总步骤',
+      completed: '执行完成',
+      successRate: '成功率',
+      passRate: '通过率',
+      testPassRate: '测试通过率',
+    }
+)
+
+const formatShare = (percent: number) => (
+  isEnglish.value ? `Share ${percent}%` : `占比 ${percent}%`
+)
 
 const progressColor = computed(() => {
   if (reportStatus.value === 'success') return '#22c55e'

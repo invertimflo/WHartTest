@@ -11,11 +11,14 @@ import TestCaseSearch from './TestCaseSearch.vue'
 import TestCaseFilter from './TestCaseFilter.vue'
 import TestCaseTable from './TestCaseTable.vue'
 import ReferencedInterfacesDialog from './ReferencedInterfacesDialog.vue'
+import { showExtractPersistenceNotice } from '../../utils/extractPersistence'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 const projectStore = useProjectStore()
 const environmentStore = useEnvironmentStore()
 const themeStore = useThemeStore()
 const router = useRouter()
+const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
 const testcases = ref<ApiTestCase[]>([])
 const isDarkTheme = computed(() => themeStore.isBlack)
@@ -68,11 +71,11 @@ const fetchTestCases = async (page: number = 1) => {
       pagination.total = (res.data as any).count || testcases.value.length
       pagination.current = page
     } else {
-      throw new Error(res.error || '获取测试用例列表失败')
+      throw new Error(res.error || tl('获取测试用例列表失败'))
     }
   } catch (error) {
     console.error('Failed to fetch test cases:', error)
-    Message.error(error instanceof Error ? error.message : '获取测试用例列表失败')
+    Message.error(error instanceof Error ? error.message : tl('获取测试用例列表失败'))
     testcases.value = []
     pagination.total = 0
   } finally {
@@ -139,7 +142,7 @@ const handleEdit = (testcase: ApiTestCase) => {
 
 const handleRun = async (testcase: ApiTestCase) => {
   if (!environmentStore.currentEnvironmentId) {
-    Message.warning('请先选择环境')
+    Message.warning(tl('请先选择环境'))
     return
   }
 
@@ -151,13 +154,14 @@ const handleRun = async (testcase: ApiTestCase) => {
       environment_id: Number(environmentStore.currentEnvironmentId)
     })
     if (res.success) {
-      Message.success('用例运行成功')
+      showExtractPersistenceNotice((res.data as any)?.extract_persistence)
+      Message.success(tl('用例运行成功'))
     } else {
-      throw new Error(res.error || '运行用例失败')
+      throw new Error(res.error || tl('运行用例失败'))
     }
   } catch (error) {
     console.error('运行用例失败:', error)
-    Message.error(error instanceof Error ? error.message : '运行用例失败')
+    Message.error(error instanceof Error ? error.message : tl('运行用例失败'))
   } finally {
     loading.value = false
   }
@@ -183,14 +187,20 @@ const handleReferencedInterfacesClose = () => {
   currentTestcase.value = null
 }
 
+const formatDeleteCaseContent = (caseName: string) => {
+  return isEnglish.value
+    ? `Are you sure you want to delete test case "${caseName}"? This will also delete all test steps and execution records and cannot be undone.`
+    : `确定要删除测试用例「${caseName}」吗？删除后将同时删除所有测试步骤和执行记录，且无法恢复。`
+}
+
 const handleDelete = async (testcase: ApiTestCase) => {
   if (!projectStore.currentProjectId) return
 
   Modal.confirm({
-    title: '确认删除',
-    content: `确定要删除测试用例「${testcase.name}」吗？删除后将同时删除所有测试步骤和执行记录，且无法恢复。`,
-    okText: '确认删除',
-    cancelText: '取消',
+    title: tl('确认删除'),
+    content: formatDeleteCaseContent(testcase.name),
+    okText: tl('确认删除'),
+    cancelText: tl('取消'),
     okButtonProps: {
       status: 'danger'
     },
@@ -198,11 +208,11 @@ const handleDelete = async (testcase: ApiTestCase) => {
       try {
         loading.value = true
         await testcaseService.delete(projectStore.currentProjectId!, testcase.id!)
-        Message.success('测试用例删除成功')
+        Message.success(tl('测试用例删除成功'))
         await fetchTestCases(pagination.current)
       } catch (error: any) {
         console.error('删除测试用例失败:', error)
-        Message.error('删除测试用例失败')
+        Message.error(tl('删除测试用例失败'))
       } finally {
         loading.value = false
       }
@@ -247,10 +257,10 @@ fetchTestCases()
         </div>
         <div class="flex items-center gap-2">
           <a-button class="custom-reset-button" @click="handleReset">
-            重置
+            {{ tl('重置') }}
           </a-button>
           <a-button type="primary" class="custom-add-button" @click="handleCreate">
-            新增用例
+            {{ tl('新增用例') }}
           </a-button>
         </div>
       </div>

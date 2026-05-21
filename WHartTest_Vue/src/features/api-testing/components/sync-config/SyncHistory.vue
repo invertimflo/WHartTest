@@ -4,10 +4,12 @@ import { Message, Modal } from '@arco-design/web-vue'
 import { IconRefresh } from '@arco-design/web-vue/es/icon'
 import { syncApi, type SyncHistory } from '../../services/syncService'
 import type { TableColumnData } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 const loading = ref(false)
 const histories = ref<SyncHistory[]>([])
@@ -19,40 +21,194 @@ const currentHistory = ref<SyncHistory | null>(null)
 const diffFields = ref<Array<{ key: string; oldValue: any; newValue: any; changed: boolean }>>([])
 const showUnchanged = ref(false)
 
-const columns: TableColumnData[] = [
+const text = computed(() => isEnglish.value
+  ? {
+      index: 'No.',
+      configName: 'Config Name',
+      syncFields: 'Sync Fields',
+      syncStatus: 'Sync Status',
+      createdInfo: 'Created Info',
+      actions: 'Actions',
+      selectProjectFirst: 'Please select a project first',
+      fetchSyncHistoryFailed: 'Failed to fetch sync history',
+      fetchHistoryDetailFailed: 'Failed to fetch history details',
+      confirmRollbackTitle: 'Confirm Rollback',
+      historyRecord: 'this history record',
+      confirmRollbackContent: (name: string) => `Are you sure you want to roll back to "${name}"? This action may affect the current configuration.`,
+      confirmRollback: 'Confirm Rollback',
+      cancel: 'Cancel',
+      rollbackSuccess: 'Rollback successful',
+      rollbackFailed: 'Rollback failed',
+      notSet: 'Not set',
+      refresh: 'Refresh',
+      success: 'Succeeded',
+      failed: 'Failed',
+      operator: 'Operator:',
+      time: 'Time:',
+      details: 'Details',
+      rollback: 'Roll Back',
+      syncHistoryDetail: 'Sync History Details',
+      operatorName: 'Operator',
+      errorMessage: 'Error Message',
+      totalFields: (count: number) => `${count} fields total`,
+      noSyncFields: 'No sync fields',
+      dataChangeDetails: 'Data Change Details',
+      hideUnchangedFields: 'Hide unchanged fields',
+      showUnchangedFields: 'Show unchanged fields',
+      fieldName: 'Field Name',
+      beforeChange: 'Before Change',
+      afterChange: 'After Change',
+    }
+  : {
+      index: '序号',
+      configName: '配置名称',
+      syncFields: '同步字段',
+      syncStatus: '同步状态',
+      createdInfo: '创建信息',
+      actions: '操作',
+      selectProjectFirst: '请先选择项目',
+      fetchSyncHistoryFailed: '获取同步历史失败',
+      fetchHistoryDetailFailed: '获取历史详情失败',
+      confirmRollbackTitle: '确认回滚',
+      historyRecord: '此历史记录',
+      confirmRollbackContent: (name: string) => `确定要回滚到"${name}"吗？此操作可能影响当前配置。`,
+      confirmRollback: '确认回滚',
+      cancel: '取消',
+      rollbackSuccess: '回滚成功',
+      rollbackFailed: '回滚失败',
+      notSet: '未设置',
+      refresh: '刷新',
+      success: '成功',
+      failed: '失败',
+      operator: '操作者：',
+      time: '时间：',
+      details: '详情',
+      rollback: '回滚',
+      syncHistoryDetail: '同步历史详情',
+      operatorName: '操作人',
+      errorMessage: '错误信息',
+      totalFields: (count: number) => `共 ${count} 个字段`,
+      noSyncFields: '暂无同步字段',
+      dataChangeDetails: '数据变更详情',
+      hideUnchangedFields: '收起未变更字段',
+      showUnchangedFields: '显示未变更字段',
+      fieldName: '字段名称',
+      beforeChange: '变更前',
+      afterChange: '变更后',
+    }
+)
+
+const columns = computed<TableColumnData[]>(() => [
   {
-    title: '序号',
+    title: text.value.index,
     width: 80,
     align: 'center',
     slotName: 'index'
   },
   {
-    title: '配置名称',
+    title: text.value.configName,
     slotName: 'config_name'
   },
   {
-    title: '同步字段',
+    title: text.value.syncFields,
     slotName: 'sync_fields'
   },
   {
-    title: '同步状态',
-    width: 100,
+    title: text.value.syncStatus,
+    width: isEnglish.value ? 120 : 100,
     slotName: 'status'
   },
   {
-    title: '创建信息',
+    title: text.value.createdInfo,
     slotName: 'created_info'
   },
   {
-    title: '操作',
-    width: 100,
+    title: text.value.actions,
+    width: isEnglish.value ? 120 : 100,
     slotName: 'operations'
   }
-]
+])
+
+const fieldDescriptions = computed<Record<string, string>>(() => isEnglish.value
+  ? {
+      name: 'Config Name',
+      description: 'Config Description',
+      status: 'Status',
+      created_at: 'Created At',
+      updated_at: 'Updated At',
+      method: 'Request Method',
+      url: 'Request URL',
+      headers: 'Headers',
+      params: 'Query Params',
+      body: 'Request Body',
+      setup_hooks: 'Setup Hooks',
+      teardown_hooks: 'Teardown Hooks',
+      variables: 'Variables',
+      validators: 'Validators',
+      extract: 'Extract Variables',
+      request_type: 'Request Type',
+      timeout: 'Timeout',
+      verify: 'SSL Verification',
+      allow_redirects: 'Allow Redirects',
+      base_url: 'Base URL',
+      json: 'JSON Data',
+      data: 'Form Data',
+      files: 'Files',
+      auth: 'Auth Info',
+      cookies: 'Cookies',
+      proxies: 'Proxy Settings',
+      env: 'Environment Variables',
+      export: 'Export Variables',
+      validate: 'Validation Rules',
+      retry_times: 'Retry Count',
+      retry_interval: 'Retry Interval',
+      weight: 'Weight',
+      priority: 'Priority',
+      skip: 'Skip',
+      times: 'Execution Count'
+    }
+  : {
+      name: '配置名称',
+      description: '配置描述',
+      status: '状态',
+      created_at: '创建时间',
+      updated_at: '更新时间',
+      method: '请求方法',
+      url: '请求地址',
+      headers: '请求头',
+      params: '查询参数',
+      body: '请求体',
+      setup_hooks: '前置钩子',
+      teardown_hooks: '后置钩子',
+      variables: '变量定义',
+      validators: '断言规则',
+      extract: '提取变量',
+      request_type: '请求类型',
+      timeout: '超时时间',
+      verify: 'SSL验证',
+      allow_redirects: '允许重定向',
+      base_url: '基础URL',
+      json: 'JSON数据',
+      data: '表单数据',
+      files: '文件数据',
+      auth: '认证信息',
+      cookies: 'Cookie信息',
+      proxies: '代理设置',
+      env: '环境变量',
+      export: '导出变量',
+      validate: '验证规则',
+      retry_times: '重试次数',
+      retry_interval: '重试间隔',
+      weight: '权重',
+      priority: '优先级',
+      skip: '是否跳过',
+      times: '执行次数'
+    }
+)
 
 const fetchHistories = async () => {
   if (!projectStore.currentProject?.id) {
-    Message.error('请先选择项目')
+    Message.error(text.value.selectProjectFirst)
     return
   }
 
@@ -77,7 +233,7 @@ const fetchHistories = async () => {
       total.value = 0
     }
   } catch (error) {
-    Message.error('获取同步历史失败')
+    Message.error(text.value.fetchSyncHistoryFailed)
     console.error(error)
     histories.value = []
     total.value = 0
@@ -105,7 +261,7 @@ const handleViewDetail = async (record: SyncHistory) => {
     processDiffData() // 处理数据对比
     showDetailModal.value = true
   } catch (error) {
-    Message.error('获取历史详情失败')
+    Message.error(text.value.fetchHistoryDetailFailed)
     console.error(error)
   } finally {
     loading.value = false
@@ -113,21 +269,21 @@ const handleViewDetail = async (record: SyncHistory) => {
 }
 
 const handleRollback = async (record: SyncHistory) => {
-  const configName = record.sync_config_info?.name || record.config?.name || '此历史记录';
+  const configName = record.sync_config_info?.name || record.config?.name || text.value.historyRecord
   
   Modal.warning({
-    title: '确认回滚',
-    content: `确定要回滚到"${configName}"吗？此操作可能影响当前配置。`,
-    okText: '确认回滚',
-    cancelText: '取消',
+    title: text.value.confirmRollbackTitle,
+    content: text.value.confirmRollbackContent(configName),
+    okText: text.value.confirmRollback,
+    cancelText: text.value.cancel,
     async onOk() {
       try {
         loading.value = true
         await syncApi.rollbackHistory(record.id)
-        Message.success('回滚成功')
+        Message.success(text.value.rollbackSuccess)
         await fetchHistories()
       } catch (error) {
-        Message.error('回滚失败')
+        Message.error(text.value.rollbackFailed)
         console.error(error)
       } finally {
         loading.value = false
@@ -163,7 +319,7 @@ const processDiffData = () => {
 
 // 格式化值的显示
 const formatValue = (value: any): string => {
-  if (value === undefined) return '未设置'
+  if (value === undefined) return text.value.notSet
   if (value === null) return 'null'
   if (typeof value === 'object') {
     try {
@@ -209,45 +365,7 @@ const formatValue = (value: any): string => {
 
 // 获取字段说明
 const getFieldDescription = (key: string): string => {
-  const descriptions: Record<string, string> = {
-    name: '配置名称',
-    description: '配置描述',
-    status: '状态',
-    created_at: '创建时间',
-    updated_at: '更新时间',
-    method: '请求方法',
-    url: '请求地址',
-    headers: '请求头',
-    params: '查询参数',
-    body: '请求体',
-    setup_hooks: '前置钩子',
-    teardown_hooks: '后置钩子',
-    variables: '变量定义',
-    validators: '断言规则',
-    extract: '提取变量',
-    // 添加更多同步字段的中文映射
-    request_type: '请求类型',
-    timeout: '超时时间',
-    verify: 'SSL验证',
-    allow_redirects: '允许重定向',
-    base_url: '基础URL',
-    json: 'JSON数据',
-    data: '表单数据',
-    files: '文件数据',
-    auth: '认证信息',
-    cookies: 'Cookie信息',
-    proxies: '代理设置',
-    env: '环境变量',
-    export: '导出变量',
-    validate: '验证规则',
-    retry_times: '重试次数',
-    retry_interval: '重试间隔',
-    weight: '权重',
-    priority: '优先级',
-    skip: '是否跳过',
-    times: '执行次数'
-  }
-  return descriptions[key] || key
+  return fieldDescriptions.value[key] || key
 }
 
 watch(() => projectStore.currentProject?.id, (newProjectId: number | undefined) => {
@@ -274,7 +392,7 @@ onMounted(() => {
         <template #icon>
           <icon-refresh />
         </template>
-        刷新
+        {{ text.refresh }}
       </a-button>
     </div>
 
@@ -323,7 +441,7 @@ onMounted(() => {
           size="medium"
           class="min-w-[60px] text-center"
         >
-          {{ (record.sync_status === 'success' || record.status === 'success') ? '成功' : '失败' }}
+          {{ (record.sync_status === 'success' || record.status === 'success') ? text.success : text.failed }}
         </a-tag>
         <a-tooltip v-if="record.error_message">
           <template #content>
@@ -335,8 +453,8 @@ onMounted(() => {
 
       <template #created_info="{ record }">
         <div class="flex flex-col gap-1 text-sm">
-          <span>操作者：{{ record.operator_info?.username || record.created_by_info?.username || '-' }}</span>
-          <span>时间：{{ record.sync_time ? new Date(record.sync_time).toLocaleString() : (record.created_at ? new Date(record.created_at).toLocaleString() : '-') }}</span>
+          <span>{{ text.operator }}{{ record.operator_info?.username || record.created_by_info?.username || '-' }}</span>
+          <span>{{ text.time }}{{ record.sync_time ? new Date(record.sync_time).toLocaleString() : (record.created_at ? new Date(record.created_at).toLocaleString() : '-') }}</span>
         </div>
       </template>
 
@@ -348,7 +466,7 @@ onMounted(() => {
             :loading="loading"
             @click="handleViewDetail(record)"
           >
-            详情
+            {{ text.details }}
           </a-button>
           <a-button
             v-if="record.sync_status === 'success' || record.status === 'success'"
@@ -358,7 +476,7 @@ onMounted(() => {
             :loading="loading"
             @click="handleRollback(record)"
           >
-            回滚
+            {{ text.rollback }}
           </a-button>
         </div>
       </template>
@@ -367,7 +485,7 @@ onMounted(() => {
     <!-- 详情弹窗 -->
     <a-modal
       v-model:visible="showDetailModal"
-      title="同步历史详情"
+      :title="text.syncHistoryDetail"
       :width="900"
       :modal-class="isDarkTheme ? 'sync-history-modal sync-history-modal--dark' : 'sync-history-modal sync-history-modal--light'"
       @cancel="currentHistory = null"
@@ -376,7 +494,7 @@ onMounted(() => {
         <div class="grid grid-cols-4 gap-3">
           <div class="detail-cell rounded">
             <div class="detail-cell-title py-2 px-3 font-medium border-b">
-              配置名称
+              {{ text.configName }}
             </div>
             <div class="detail-cell-body py-2 px-3">
               {{ currentHistory?.sync_config_info?.name || currentHistory?.config?.name || '-' }}
@@ -385,7 +503,7 @@ onMounted(() => {
 
           <div class="detail-cell rounded">
             <div class="detail-cell-title py-2 px-3 font-medium border-b">
-              同步状态
+              {{ text.syncStatus }}
             </div>
             <div class="detail-cell-body py-2 px-3">
               <span 
@@ -396,14 +514,14 @@ onMounted(() => {
                     : 'bg-red-500'
                 ]"
               >
-                {{ (currentHistory?.sync_status === 'success' || currentHistory?.status === 'success') ? '成功' : '失败' }}
+                {{ (currentHistory?.sync_status === 'success' || currentHistory?.status === 'success') ? text.success : text.failed }}
               </span>
             </div>
           </div>
 
           <div class="detail-cell rounded">
             <div class="detail-cell-title py-2 px-3 font-medium border-b">
-              操作人
+              {{ text.operatorName }}
             </div>
             <div class="detail-cell-body py-2 px-3 text-xs">
               <div>{{ currentHistory?.operator_info?.username || currentHistory?.created_by_info?.username || '-' }}</div>
@@ -417,7 +535,7 @@ onMounted(() => {
 
           <div class="detail-cell rounded">
             <div class="detail-cell-title py-2 px-3 font-medium border-b">
-              错误信息
+              {{ text.errorMessage }}
             </div>
             <div class="detail-cell-body detail-cell-body--scroll py-2 px-3 text-xs overflow-auto max-h-[60px]">
               {{ currentHistory?.error_message || '-' }}
@@ -426,8 +544,8 @@ onMounted(() => {
 
           <div class="detail-cell detail-cell--wide rounded col-span-4">
             <div class="detail-cell-title py-1.5 px-3 font-medium border-b flex items-center justify-between">
-              <span>同步字段</span>
-              <span class="text-xs font-normal">共 {{ currentHistory?.sync_fields?.length || 0 }} 个字段</span>
+              <span>{{ text.syncFields }}</span>
+              <span class="text-xs font-normal">{{ text.totalFields(currentHistory?.sync_fields?.length || 0) }}</span>
             </div>
             <div class="detail-cell-body p-2">
               <div v-if="currentHistory?.sync_fields?.length" class="flex flex-wrap gap-1.5">
@@ -440,7 +558,7 @@ onMounted(() => {
                   {{ getFieldDescription(field) }}
                 </a-tag>
               </div>
-              <div v-else class="detail-empty text-sm">暂无同步字段</div>
+              <div v-else class="detail-empty text-sm">{{ text.noSyncFields }}</div>
             </div>
           </div>
         </div>
@@ -451,7 +569,7 @@ onMounted(() => {
           <div class="flex items-center justify-between">
             <h3 class="diff-title text-sm font-medium flex items-center">
               <span class="inline-block w-1.5 h-1.5 bg-blue-500 rounded-full mr-1.5"></span>
-              数据变更详情
+              {{ text.dataChangeDetails }}
             </h3>
             <a-button
               type="text"
@@ -459,21 +577,21 @@ onMounted(() => {
               class="diff-toggle-btn"
               @click="showUnchanged = !showUnchanged"
             >
-              {{ showUnchanged ? '收起未变更字段' : '显示未变更字段' }}
+              {{ showUnchanged ? text.hideUnchangedFields : text.showUnchangedFields }}
             </a-button>
           </div>
         </div>
 
         <div class="diff-shell rounded-lg border">
           <div class="diff-header grid grid-cols-12 gap-3 py-1.5 px-3 border-b">
-            <div class="col-span-2 diff-header-text text-xs font-medium">字段名称</div>
+            <div class="col-span-2 diff-header-text text-xs font-medium">{{ text.fieldName }}</div>
             <div class="col-span-5 diff-header-text text-xs font-medium flex items-center">
               <span class="inline-block w-1.5 h-1.5 bg-red-500/70 rounded-full mr-1.5"></span>
-              变更前
+              {{ text.beforeChange }}
             </div>
             <div class="col-span-5 diff-header-text text-xs font-medium flex items-center">
               <span class="inline-block w-1.5 h-1.5 bg-green-500/70 rounded-full mr-1.5"></span>
-              变更后
+              {{ text.afterChange }}
             </div>
           </div>
 

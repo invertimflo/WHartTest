@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, nextTick, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import {
@@ -27,6 +28,7 @@ import {
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 const databaseConfigs = ref<DatabaseConfig[]>([])
 const loading = ref(false)
@@ -36,6 +38,43 @@ const formLoading = ref(false)
 const testingConnection = ref(false)
 const activeButtonType = ref<'edit' | 'delete' | 'test' | null>(null)
 const activeConfigId = ref<number | null>(null)
+
+const panelText = computed(() => isEnglish.value
+  ? {
+      infoLine1: 'Database configs store the database connections used in the project',
+      infoLine2: 'Refer to these configs by database name in test cases',
+      infoLine3: 'For security reasons, database passwords are not displayed in the list',
+      databaseConfigs: 'Database Configs',
+      addDatabaseConfig: 'Add Database Config',
+      host: 'Host',
+      database: 'Database',
+      username: 'Username',
+      disabled: 'Disabled',
+      testConnection: 'Test Connection',
+      edit: 'Edit',
+      delete: 'Delete',
+      description: 'Description',
+      noDatabaseConfigs: 'No database configs yet',
+      noDatabaseDescription: 'Add database configs for use in test cases',
+    }
+  : {
+      infoLine1: '数据库配置用于存储项目中使用的数据库连接信息',
+      infoLine2: '您可以在测试用例中通过数据库名称引用这些配置',
+      infoLine3: '出于安全考虑，数据库密码不会显示在列表中',
+      databaseConfigs: '数据库配置列表',
+      addDatabaseConfig: '添加数据库配置',
+      host: '主机',
+      database: '数据库',
+      username: '用户名',
+      disabled: '已禁用',
+      testConnection: '测试连接',
+      edit: '编辑',
+      delete: '删除',
+      description: '描述',
+      noDatabaseConfigs: '暂无数据库配置',
+      noDatabaseDescription: '您可以添加数据库配置，在测试用例中使用这些数据库连接',
+    }
+)
 
 // 表单数据
 const formData = ref<CreateDatabaseConfigData>({
@@ -550,22 +589,22 @@ defineExpose({
     <div class="info-card p-4 text-sm space-y-2 mb-4 rounded-lg flex-shrink-0">
       <div class="flex items-start gap-2">
         <icon-info-circle class="text-blue-400 mt-0.5 flex-shrink-0" />
-        <div>数据库配置用于存储项目中使用的数据库连接信息</div>
+        <div>{{ panelText.infoLine1 }}</div>
       </div>
       <div class="flex items-start gap-2">
         <icon-link class="text-teal-400 mt-0.5 flex-shrink-0" />
-        <div>您可以在测试用例中通过数据库名称引用这些配置</div>
+        <div>{{ panelText.infoLine2 }}</div>
       </div>
       <div class="flex items-start gap-2">
         <icon-exclamation-circle class="text-amber-400 mt-0.5 flex-shrink-0" />
-        <div>出于安全考虑，数据库密码不会显示在列表中</div>
+        <div>{{ panelText.infoLine3 }}</div>
       </div>
     </div>
 
     <!-- 数据库配置列表标题 -->
     <div class="flex items-center gap-2 mb-4 flex-shrink-0">
       <icon-storage class="panel-title-icon" />
-      <span class="panel-title-text font-medium">数据库配置列表</span>
+      <span class="panel-title-text font-medium">{{ panelText.databaseConfigs }}</span>
       
       <a-button 
         size="mini" 
@@ -576,7 +615,7 @@ defineExpose({
         <template #icon>
           <icon-plus class="panel-action-icon" />
         </template>
-        添加数据库配置
+        {{ panelText.addDatabaseConfig }}
       </a-button>
     </div>
 
@@ -624,23 +663,23 @@ defineExpose({
                   
                   <!-- 第三列：主机 (增加宽度) -->
                   <div class="overflow-hidden whitespace-nowrap text-ellipsis col-host justify-center">
-                    <span class="config-meta-label text-xs font-medium mr-1">主机: </span>
+                    <span class="config-meta-label text-xs font-medium mr-1">{{ panelText.host }}: </span>
                     <span class="config-meta-value whitespace-nowrap font-medium">{{ config.host }}:{{ config.port }}</span>
                   </div>
                   
                   <!-- 第四列：数据库 -->
                   <div class="overflow-hidden whitespace-nowrap text-ellipsis justify-center">
-                    <span class="config-meta-label text-xs font-medium mr-1">数据库: </span>
+                    <span class="config-meta-label text-xs font-medium mr-1">{{ panelText.database }}: </span>
                     <span class="config-meta-value whitespace-nowrap font-medium">{{ config.database }}</span>
                   </div>
                   
                   <!-- 第五列：用户名 + 状态 -->
                   <div class="flex items-center overflow-visible whitespace-nowrap justify-between">
                     <div class="overflow-visible">
-                      <span class="config-meta-label text-xs font-medium mr-1">用户名: </span>
+                      <span class="config-meta-label text-xs font-medium mr-1">{{ panelText.username }}: </span>
                       <span class="config-meta-value font-medium">{{ config.username }}</span>
                     </div>
-                    <span v-if="!config.is_active" class="config-disabled-tag text-xs px-1.5 py-0.5 rounded ml-1 flex-shrink-0">已禁用</span>
+                    <span v-if="!config.is_active" class="config-disabled-tag text-xs px-1.5 py-0.5 rounded ml-1 flex-shrink-0">{{ panelText.disabled }}</span>
                   </div>
                 </div>
               </div>
@@ -658,7 +697,7 @@ defineExpose({
                   :loading="testingConnection"
                   :class="{ 'active-button': activeButtonType === 'test' && activeConfigId === config.id, 'test-button': true }"
                 >
-                  测试连接
+                  {{ panelText.testConnection }}
                 </a-button>
                 <a-button 
                   type="text" 
@@ -669,7 +708,7 @@ defineExpose({
                   <template #icon>
                     <icon-edit />
                   </template>
-                  编辑
+                  {{ panelText.edit }}
                 </a-button>
                 <a-button 
                   type="text" 
@@ -681,14 +720,14 @@ defineExpose({
                   <template #icon>
                     <icon-delete />
                   </template>
-                  删除
+                  {{ panelText.delete }}
                 </a-button>
               </div>
             </div>
             
             <!-- 详细信息 -->
             <div v-if="config.description" class="config-description mt-2 text-xs px-2 py-1 pl-3">
-              <span class="config-meta-label">描述:</span>
+              <span class="config-meta-label">{{ panelText.description }}:</span>
               <span class="config-meta-value ml-2">{{ config.description }}</span>
             </div>
           </div>
@@ -703,13 +742,13 @@ defineExpose({
                 <icon-storage class="text-purple-500 text-2xl" />
               </div>
             </div>
-            <div class="empty-state-title text-base mb-2 text-center">暂无数据库配置</div>
+            <div class="empty-state-title text-base mb-2 text-center">{{ panelText.noDatabaseConfigs }}</div>
             <div class="empty-state-description text-sm mb-6 max-w-md mx-auto text-center">
-              您可以添加数据库配置，在测试用例中使用这些数据库连接
+              {{ panelText.noDatabaseDescription }}
             </div>
             <a-button type="outline" @click="handleCreate">
               <template #icon><icon-plus /></template>
-              添加数据库配置
+              {{ panelText.addDatabaseConfig }}
             </a-button>
           </div>
         </div>

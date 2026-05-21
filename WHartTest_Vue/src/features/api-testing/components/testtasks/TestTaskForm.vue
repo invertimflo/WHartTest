@@ -5,6 +5,7 @@ import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import { useEnvironmentStore } from '../../stores/environmentStore'
 import { Message, Tag as ATag, Modal, Select, Option } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { 
   getTestTaskSuite, 
   createTestTaskSuite, 
@@ -31,6 +32,7 @@ const router = useRouter()
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
 const environmentStore = useEnvironmentStore()
+const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
 const submitting = ref(false)
 const creatingAndExecuting = ref(false)
@@ -83,6 +85,13 @@ const testCasePriorityColorMap = {
 // 是否为只读模式
 const isReadOnly = computed(() => props.mode === 'view')
 const isDarkTheme = computed(() => themeStore.isBlack)
+const taskNameLabel = computed(() => isEnglish.value ? 'Task Name' : '任务名称')
+const taskNamePlaceholder = computed(() => isEnglish.value ? 'Enter task name' : '请输入任务名称')
+const failFastLabel = computed(() => (
+  isEnglish.value
+    ? 'Fail fast (stop immediately when a case fails)'
+    : '快速失败（遇到失败用例时立即停止执行）'
+))
 
 // 获取测试任务详情
 const fetchTestTaskSuite = async () => {
@@ -482,10 +491,10 @@ onMounted(async () => {
           <!-- 基本信息 -->
           <div class="form-section rounded-lg p-6 mb-6">
             <h3 class="section-title text-lg font-medium mb-4">基本信息</h3>
-            <a-form-item field="name" label="任务名称">
+            <a-form-item field="name" :label="taskNameLabel">
               <a-input 
                 v-model="formData.name" 
-                placeholder="请输入任务名称" 
+                :placeholder="taskNamePlaceholder" 
                 allow-clear
               />
             </a-form-item>
@@ -516,7 +525,7 @@ onMounted(async () => {
 
             <a-form-item field="fail_fast">
               <a-checkbox v-model="formData.fail_fast">
-                快速失败（遇到失败用例时立即停止执行）
+                {{ failFastLabel }}
               </a-checkbox>
             </a-form-item>
           </div>

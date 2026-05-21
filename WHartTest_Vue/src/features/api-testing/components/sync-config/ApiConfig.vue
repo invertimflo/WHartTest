@@ -3,6 +3,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import { IconPlus } from '@arco-design/web-vue/es/icon'
 import { syncApi, type ApiSyncConfig } from '../../services/syncService'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import ApiConfigTable from './ApiConfigTable.vue'
@@ -11,6 +12,7 @@ import ApiConfigDetail from './ApiConfigDetail.vue'
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const loading = ref(false)
 const configs = ref<ApiSyncConfig[]>([])
 const total = ref(0)
@@ -24,22 +26,95 @@ const selectedRowKeys = ref<number[]>([])
 const currentConfig = ref<ApiSyncConfig | null>(null)
 const isDarkTheme = computed(() => themeStore.isBlack)
 
-const fieldOptions = [
-  { label: '请求方法', value: 'method' },
-  { label: 'URL', value: 'url' },
-  { label: '请求头', value: 'headers' },
-  { label: '查询参数', value: 'params' },
-  { label: '请求体', value: 'body' },
-  { label: '前置钩子', value: 'setup_hooks' },
-  { label: '后置钩子', value: 'teardown_hooks' },
-  { label: '变量定义', value: 'variables' },
-  { label: '断言规则', value: 'validators' },
-  { label: '提取变量', value: 'extract' }
-]
+const text = computed(() => isEnglish.value
+  ? {
+      pageTitle: 'Interface Sync Config',
+      batchDelete: 'Batch Delete',
+      createConfig: 'Create Config',
+      pageSubtitle: 'Manage sync relationships between interfaces, test cases, and test steps',
+      selectProjectFirst: 'Please select a project first',
+      fetchConfigListFailed: 'Failed to fetch interface sync configs',
+      fetchConfigDetailFailed: 'Failed to fetch config details',
+      updateSuccess: 'Sync config updated successfully',
+      createSuccess: 'Sync config created successfully',
+      updateFailed: 'Failed to update sync config',
+      createFailed: 'Failed to create sync config',
+      deleteConfirmTitle: 'Confirm Delete',
+      deleteConfirmContent: (name: string) => `Are you sure you want to delete sync config "${name}"? This action cannot be undone.`,
+      confirmDelete: 'Delete',
+      cancel: 'Cancel',
+      deleteSuccess: 'Deleted successfully',
+      deleteFailed: 'Delete failed',
+      batchDeleteWarning: 'Please select sync configs to delete first',
+      batchDeleteTitle: 'Confirm Batch Delete',
+      batchDeleteContent: (count: number) => `Are you sure you want to delete the selected ${count} sync configs? This action cannot be undone.`,
+      batchDeleteSuccess: (count: number) => `Deleted ${count} sync configs`,
+      batchDeletePartialFailed: (count: number) => `${count} sync configs failed to delete. Please try again.`,
+      batchDeleteFailed: 'Batch delete failed',
+      syncSuccess: 'Sync executed successfully',
+      syncFailed: 'Sync execution failed',
+      selectedCount: (count: number) => `(${count})`,
+    }
+  : {
+      pageTitle: '接口同步配置',
+      batchDelete: '批量删除',
+      createConfig: '新建配置',
+      pageSubtitle: '管理接口、用例和测试步骤之间的同步关系',
+      selectProjectFirst: '请先选择项目',
+      fetchConfigListFailed: '获取接口同步配置列表失败',
+      fetchConfigDetailFailed: '获取配置详情失败',
+      updateSuccess: '更新同步配置成功',
+      createSuccess: '创建同步配置成功',
+      updateFailed: '更新同步配置失败',
+      createFailed: '创建同步配置失败',
+      deleteConfirmTitle: '确认删除',
+      deleteConfirmContent: (name: string) => `确定要删除同步配置"${name}"吗？此操作不可恢复。`,
+      confirmDelete: '确认删除',
+      cancel: '取消',
+      deleteSuccess: '删除成功',
+      deleteFailed: '删除失败',
+      batchDeleteWarning: '请先选择要删除的同步配置',
+      batchDeleteTitle: '确认批量删除',
+      batchDeleteContent: (count: number) => `确定要删除选中的 ${count} 条同步配置吗？此操作不可恢复。`,
+      batchDeleteSuccess: (count: number) => `已删除 ${count} 条同步配置`,
+      batchDeletePartialFailed: (count: number) => `${count} 条同步配置删除失败，请重试`,
+      batchDeleteFailed: '批量删除失败',
+      syncSuccess: '同步执行成功',
+      syncFailed: '同步执行失败',
+      selectedCount: (count: number) => `（${count}）`,
+    }
+)
+
+const fieldOptions = computed(() => isEnglish.value
+  ? [
+      { label: 'Request Method', value: 'method' },
+      { label: 'URL', value: 'url' },
+      { label: 'Headers', value: 'headers' },
+      { label: 'Query Params', value: 'params' },
+      { label: 'Request Body', value: 'body' },
+      { label: 'Setup Hooks', value: 'setup_hooks' },
+      { label: 'Teardown Hooks', value: 'teardown_hooks' },
+      { label: 'Variables', value: 'variables' },
+      { label: 'Validators', value: 'validators' },
+      { label: 'Extract Variables', value: 'extract' },
+    ]
+  : [
+      { label: '请求方法', value: 'method' },
+      { label: 'URL', value: 'url' },
+      { label: '请求头', value: 'headers' },
+      { label: '查询参数', value: 'params' },
+      { label: '请求体', value: 'body' },
+      { label: '前置钩子', value: 'setup_hooks' },
+      { label: '后置钩子', value: 'teardown_hooks' },
+      { label: '变量定义', value: 'variables' },
+      { label: '断言规则', value: 'validators' },
+      { label: '提取变量', value: 'extract' },
+    ]
+)
 
 const fetchConfigs = async () => {
   if (!projectStore.currentProject?.id) {
-    Message.error('请先选择项目')
+    Message.error(text.value.selectProjectFirst)
     return
   }
 
@@ -49,7 +124,7 @@ const fetchConfigs = async () => {
     configs.value = data.results
     total.value = data.count
   } catch (error) {
-    Message.error('获取接口同步配置列表失败')
+    Message.error(text.value.fetchConfigListFailed)
     console.error(error)
   } finally {
     loading.value = false
@@ -80,7 +155,7 @@ const handleEdit = async (record: ApiSyncConfig) => {
     currentConfig.value = configData
     showCreateModal.value = true
   } catch (error) {
-    Message.error('获取配置详情失败')
+    Message.error(text.value.fetchConfigDetailFailed)
     console.error(error)
   } finally {
     loading.value = false
@@ -92,10 +167,10 @@ const handleSubmit = async (formData: any) => {
     loading.value = true
     if (isEditing.value && editingConfigId.value) {
       await syncApi.updateApiConfig(editingConfigId.value, formData)
-      Message.success('更新同步配置成功')
+      Message.success(text.value.updateSuccess)
     } else {
       await syncApi.createApiConfig(formData)
-      Message.success('创建同步配置成功')
+      Message.success(text.value.createSuccess)
     }
     
     // 关闭弹窗并重置状态
@@ -111,7 +186,7 @@ const handleSubmit = async (formData: any) => {
       const errorMessages = Object.values(error.errors).flat()
       Message.error(errorMessages.join(', '))
     } else {
-      Message.error(isEditing.value ? '更新同步配置失败' : '创建同步配置失败')
+      Message.error(isEditing.value ? text.value.updateFailed : text.value.createFailed)
     }
     console.error(error)
   } finally {
@@ -133,7 +208,7 @@ const handleViewDetail = async (record: ApiSyncConfig) => {
     currentConfig.value = configData
     showDetailModal.value = true
   } catch (error) {
-    Message.error('获取配置详情失败')
+    Message.error(text.value.fetchConfigDetailFailed)
     console.error(error)
   } finally {
     loading.value = false
@@ -142,18 +217,18 @@ const handleViewDetail = async (record: ApiSyncConfig) => {
 
 const handleDelete = async (record: ApiSyncConfig) => {
   Modal.warning({
-    title: '确认删除',
-    content: `确定要删除同步配置"${record.name}"吗？此操作不可恢复。`,
-    okText: '确认删除',
-    cancelText: '取消',
+    title: text.value.deleteConfirmTitle,
+    content: text.value.deleteConfirmContent(record.name),
+    okText: text.value.confirmDelete,
+    cancelText: text.value.cancel,
     async onOk() {
       try {
         loading.value = true
         await syncApi.deleteApiConfig(record.id)
-        Message.success('删除成功')
+        Message.success(text.value.deleteSuccess)
         await fetchConfigs()
       } catch (error) {
-        Message.error('删除失败')
+        Message.error(text.value.deleteFailed)
         console.error(error)
       } finally {
         loading.value = false
@@ -164,17 +239,17 @@ const handleDelete = async (record: ApiSyncConfig) => {
 
 const handleBatchDelete = async () => {
   if (!selectedRowKeys.value.length) {
-    Message.warning('请先选择要删除的同步配置')
+    Message.warning(text.value.batchDeleteWarning)
     return
   }
 
   const ids = [...selectedRowKeys.value]
 
   Modal.warning({
-    title: '确认批量删除',
-    content: `确定要删除选中的 ${ids.length} 条同步配置吗？此操作不可恢复。`,
-    okText: '确认删除',
-    cancelText: '取消',
+    title: text.value.batchDeleteTitle,
+    content: text.value.batchDeleteContent(ids.length),
+    okText: text.value.confirmDelete,
+    cancelText: text.value.cancel,
     async onOk() {
       try {
         loading.value = true
@@ -183,17 +258,17 @@ const handleBatchDelete = async () => {
         const successCount = ids.length - failedCount
 
         if (successCount > 0) {
-          Message.success(`已删除 ${successCount} 条同步配置`)
+          Message.success(text.value.batchDeleteSuccess(successCount))
         }
 
         if (failedCount > 0) {
-          Message.warning(`${failedCount} 条同步配置删除失败，请重试`)
+          Message.warning(text.value.batchDeletePartialFailed(failedCount))
         }
 
         selectedRowKeys.value = []
         await fetchConfigs()
       } catch (error) {
-        Message.error('批量删除失败')
+        Message.error(text.value.batchDeleteFailed)
         console.error(error)
       } finally {
         loading.value = false
@@ -206,9 +281,9 @@ const handleSyncNow = async (record: ApiSyncConfig) => {
   try {
     loading.value = true
     await syncApi.syncNowConfig(record.id)
-    Message.success('同步执行成功')
+    Message.success(text.value.syncSuccess)
   } catch (error) {
-    Message.error('同步执行失败')
+    Message.error(text.value.syncFailed)
     console.error(error)
   } finally {
     loading.value = false
@@ -262,7 +337,7 @@ onMounted(() => {
     <!-- 页面头部 -->
     <div class="api-config-header px-8 py-6 border-b">
       <div class="flex items-center justify-between">
-        <h1 class="api-config-title text-xl font-semibold">接口同步配置</h1>
+        <h1 class="api-config-title text-xl font-semibold">{{ text.pageTitle }}</h1>
         <div class="flex items-center gap-2">
           <a-button
             type="outline"
@@ -271,17 +346,17 @@ onMounted(() => {
             :loading="loading"
             @click="handleBatchDelete"
           >
-            批量删除<span v-if="selectedRowKeys.length > 0">（{{ selectedRowKeys.length }}）</span>
+            {{ text.batchDelete }}<span v-if="selectedRowKeys.length > 0">{{ text.selectedCount(selectedRowKeys.length) }}</span>
           </a-button>
           <a-button type="primary" :loading="loading" @click="handleCreate">
             <template #icon>
               <icon-plus />
             </template>
-            新建配置
+            {{ text.createConfig }}
           </a-button>
         </div>
       </div>
-      <p class="api-config-subtitle mt-2 text-sm">管理接口、用例和测试步骤之间的同步关系</p>
+      <p class="api-config-subtitle mt-2 text-sm">{{ text.pageSubtitle }}</p>
     </div>
 
     <!-- 主要内容区域 -->

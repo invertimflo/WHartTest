@@ -3,11 +3,13 @@ import { ref, reactive, watch, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import type { ApiInterface, TestCase, TestStep } from '../../services/syncService'
 import { syncApi } from '../../services/syncService'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 
 const props = defineProps<{
@@ -70,6 +72,93 @@ const modalVisible = computed({
   set: (value: boolean) => emit('update:visible', value)
 })
 
+const text = computed(() => isEnglish.value
+  ? {
+      editSyncConfig: 'Edit Sync Config',
+      createSyncConfig: 'Create Sync Config',
+      configName: 'Config Name',
+      enterConfigName: 'Enter config name',
+      configDescription: 'Config Description',
+      enterConfigDescription: 'Enter config description',
+      selectInterface: 'Select Interface',
+      selectAnInterface: 'Select an interface',
+      selectTestCase: 'Select Test Case',
+      selectATestCase: 'Select a test case',
+      selectStep: 'Select Step',
+      selectAStep: 'Select a step',
+      syncFields: 'Sync Fields',
+      selectSyncFields: 'Select sync fields',
+      syncMode: 'Sync Mode',
+      manualSync: 'Manual Sync',
+      autoSync: 'Auto Sync',
+      watchFields: 'Watch Fields',
+      selectFieldsToWatch: 'Select fields to watch',
+      enableSync: 'Enable Sync',
+      fillRequired: 'Please fill in required fields',
+      selectProjectFirst: 'Please select a project first',
+      fetchInterfacesFailed: 'Failed to fetch interfaces',
+      fetchTestCasesFailed: 'Failed to fetch test cases',
+      fetchStepsFailed: 'Failed to fetch test steps',
+      stepPrefix: 'Step',
+    }
+  : {
+      editSyncConfig: '编辑同步配置',
+      createSyncConfig: '新建同步配置',
+      configName: '配置名称',
+      enterConfigName: '请输入配置名称',
+      configDescription: '配置描述',
+      enterConfigDescription: '请输入配置描述',
+      selectInterface: '选择接口',
+      selectAnInterface: '请选择接口',
+      selectTestCase: '选择用例',
+      selectATestCase: '请选择用例',
+      selectStep: '选择步骤',
+      selectAStep: '请选择步骤',
+      syncFields: '同步字段',
+      selectSyncFields: '请选择同步字段',
+      syncMode: '同步模式',
+      manualSync: '手动同步',
+      autoSync: '自动同步',
+      watchFields: '监视字段',
+      selectFieldsToWatch: '请选择需要监视的字段',
+      enableSync: '启用同步',
+      fillRequired: '请填写必填项',
+      selectProjectFirst: '请先选择项目',
+      fetchInterfacesFailed: '获取接口列表失败',
+      fetchTestCasesFailed: '获取用例列表失败',
+      fetchStepsFailed: '获取步骤列表失败',
+      stepPrefix: '步骤',
+    }
+)
+
+const fieldLabelMap: Record<string, string> = {
+  '请求方法': 'Request Method',
+  'URL': 'URL',
+  '请求头': 'Headers',
+  '查询参数': 'Query Params',
+  '请求体': 'Request Body',
+  '前置钩子': 'Setup Hooks',
+  '后置钩子': 'Teardown Hooks',
+  '变量定义': 'Variables',
+  '断言规则': 'Validators',
+  '提取变量': 'Extract Variables',
+}
+
+const localizedFieldOptions = computed(() => {
+  if (!isEnglish.value) {
+    return props.fieldOptions
+  }
+
+  return props.fieldOptions.map(option => ({
+    ...option,
+    label: fieldLabelMap[option.label] || option.label,
+  }))
+})
+
+const getStepOptionLabel = (item: TestStep) => (
+  isEnglish.value ? `${item.name} (${text.value.stepPrefix} ${item.order})` : `${item.name} (${text.value.stepPrefix}${item.order})`
+)
+
 // 添加接口、用例和步骤的列表数据
 const interfaces = ref<ApiInterface[]>([])
 const testcases = ref<TestCase[]>([])
@@ -86,7 +175,7 @@ const isLoadingStepsFromConfig = ref(false);
 // 获取接口列表
 const fetchInterfaces = async () => {
   if (!projectStore.currentProject?.id) {
-    Message.error('请先选择项目')
+    Message.error(text.value.selectProjectFirst)
     return
   }
 
@@ -95,7 +184,7 @@ const fetchInterfaces = async () => {
     const { data } = await syncApi.getInterfaces(projectStore.currentProject.id)
     interfaces.value = Array.isArray(data.results) ? data.results : []
   } catch (error) {
-    Message.error('获取接口列表失败')
+    Message.error(text.value.fetchInterfacesFailed)
     console.error(error)
   } finally {
     loadingInterfaces.value = false
@@ -105,7 +194,7 @@ const fetchInterfaces = async () => {
 // 获取用例列表
 const fetchTestCases = async () => {
   if (!projectStore.currentProject?.id) {
-    Message.error('请先选择项目')
+    Message.error(text.value.selectProjectFirst)
     return
   }
 
@@ -114,7 +203,7 @@ const fetchTestCases = async () => {
     const { data } = await syncApi.getTestCases(projectStore.currentProject.id)
     testcases.value = Array.isArray(data.results) ? data.results : []
   } catch (error) {
-    Message.error('获取用例列表失败')
+    Message.error(text.value.fetchTestCasesFailed)
     console.error(error)
   } finally {
     loadingTestcases.value = false
@@ -140,7 +229,7 @@ const fetchTestSteps = async () => {
     })) || []
   } catch (error) {
     console.error('获取步骤列表失败:', error)
-    Message.error('获取步骤列表失败')
+    Message.error(text.value.fetchStepsFailed)
     teststeps.value = []
   } finally {
     loadingTestSteps.value = false
@@ -261,7 +350,7 @@ watch(() => props.visible, (newVisible) => {
 const handleSubmit = () => {
   const { interface: interfaceId, testcase: testcaseId, step: stepId } = formModel
   if (!interfaceId || !testcaseId || !stepId) {
-    Message.error('请填写必填项')
+    Message.error(text.value.fillRequired)
     return
   }
 
@@ -286,32 +375,32 @@ defineExpose({
 <template>
   <a-modal
     v-model:visible="modalVisible"
-    :title="isEditing ? '编辑同步配置' : '新建同步配置'"
+    :title="isEditing ? text.editSyncConfig : text.createSyncConfig"
     :width="780"
     :modal-class="isDarkTheme ? 'api-config-form-modal api-config-form-modal--dark' : 'api-config-form-modal api-config-form-modal--light'"
     @ok="handleSubmit"
   >
     <a-form :model="formModel" layout="vertical">
-      <a-form-item field="name" label="配置名称" required>
+      <a-form-item field="name" :label="text.configName" required>
         <a-input
           v-model="formModel.name"
-          placeholder="请输入配置名称"
+          :placeholder="text.enterConfigName"
           allow-clear
         />
       </a-form-item>
 
-      <a-form-item field="description" label="配置描述">
+      <a-form-item field="description" :label="text.configDescription">
         <a-textarea
           v-model="formModel.description"
-          placeholder="请输入配置描述"
+          :placeholder="text.enterConfigDescription"
           allow-clear
         />
       </a-form-item>
 
-      <a-form-item field="interface" label="选择接口" required>
+      <a-form-item field="interface" :label="text.selectInterface" required>
         <a-select
           v-model="formModel.interface"
-          placeholder="请选择接口"
+          :placeholder="text.selectAnInterface"
           :loading="loadingInterfaces"
         >
           <a-option
@@ -323,10 +412,10 @@ defineExpose({
         </a-select>
       </a-form-item>
 
-      <a-form-item field="testcase" label="选择用例" required>
+      <a-form-item field="testcase" :label="text.selectTestCase" required>
         <a-select
           v-model="formModel.testcase"
-          placeholder="请选择用例"
+          :placeholder="text.selectATestCase"
           :loading="loadingTestcases"
         >
           <a-option
@@ -338,29 +427,29 @@ defineExpose({
         </a-select>
       </a-form-item>
 
-      <a-form-item field="step" label="选择步骤" required>
+      <a-form-item field="step" :label="text.selectStep" required>
         <a-select
           v-model="formModel.step"
-          placeholder="请选择步骤"
+          :placeholder="text.selectAStep"
           :loading="loadingTestSteps"
         >
           <a-option
             v-for="item in teststeps"
             :key="item.id"
             :value="item.id"
-            :label="`${item.name} (步骤${item.order})`"
+            :label="getStepOptionLabel(item)"
           />
         </a-select>
       </a-form-item>
 
-      <a-form-item field="sync_fields" label="同步字段" required>
+      <a-form-item field="sync_fields" :label="text.syncFields" required>
         <a-select
           v-model="formModel.sync_fields"
-          placeholder="请选择同步字段"
+          :placeholder="text.selectSyncFields"
           multiple
         >
           <a-option
-            v-for="option in fieldOptions"
+            v-for="option in localizedFieldOptions"
             :key="option.value"
             :value="option.value"
             :label="option.label"
@@ -368,25 +457,25 @@ defineExpose({
         </a-select>
       </a-form-item>
 
-      <a-form-item field="sync_mode" label="同步模式" required>
+      <a-form-item field="sync_mode" :label="text.syncMode" required>
         <a-radio-group v-model="formModel.sync_mode">
-          <a-radio value="manual">手动同步</a-radio>
-          <a-radio value="auto">自动同步</a-radio>
+          <a-radio value="manual">{{ text.manualSync }}</a-radio>
+          <a-radio value="auto">{{ text.autoSync }}</a-radio>
         </a-radio-group>
       </a-form-item>
 
       <a-form-item
         v-if="formModel.sync_mode === 'auto'"
         field="sync_trigger.fields_to_watch"
-        label="监视字段"
+        :label="text.watchFields"
       >
         <a-select
           v-model="formModel.sync_trigger.fields_to_watch"
-          placeholder="请选择需要监视的字段"
+          :placeholder="text.selectFieldsToWatch"
           multiple
         >
           <a-option
-            v-for="option in fieldOptions"
+            v-for="option in localizedFieldOptions"
             :key="option.value"
             :value="option.value"
             :label="option.label"
@@ -397,7 +486,7 @@ defineExpose({
       <div class="modal-divider flex justify-between items-center mt-4 pt-4 border-t">
         <a-checkbox v-model="formModel.sync_enabled">
           <template #default>
-            <span class="sync-enabled-text">启用同步</span>
+            <span class="sync-enabled-text">{{ text.enableSync }}</span>
           </template>
         </a-checkbox>
       </div>

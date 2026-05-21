@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { IconDelete, IconPlus } from '@arco-design/web-vue/es/icon'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 interface KeyValuePair {
   key: string
@@ -18,6 +19,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits(['update:headers'])
+const { tl } = useAppI18n()
 
 const headersList = ref<KeyValuePair[]>([{ key: '', value: '', description: '', enabled: true }])
 
@@ -75,9 +77,9 @@ defineExpose({ getHeaders })
           class="flex items-center gap-2"
         >
           <a-checkbox v-model="header.enabled" />
-          <a-input v-model="header.key" placeholder="Key" allow-clear />
-          <a-input v-model="header.value" placeholder="Value" allow-clear />
-          <a-input v-model="header.description" placeholder="Description" allow-clear />
+          <a-input v-model="header.key" :placeholder="tl('Key')" allow-clear />
+          <a-input v-model="header.value" :placeholder="tl('Value')" allow-clear />
+          <a-input v-model="header.description" :placeholder="tl('Description')" allow-clear />
           <a-button type="text" status="danger" @click="deleteHeader(index)">
             <template #icon><icon-delete /></template>
           </a-button>
@@ -87,7 +89,7 @@ defineExpose({ getHeaders })
     <div>
       <a-button type="outline" @click="addHeader">
         <template #icon><icon-plus /></template>
-        添加请求头
+        {{ tl('添加请求头') }}
       </a-button>
     </div>
   </div>

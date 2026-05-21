@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { IconPlus, IconEmpty, IconStar, IconDelete } from '@arco-design/web-vue/es/icon'
 import { syncApi, type SyncConfig } from '../../services/syncService'
 import type { TableColumnData } from '@arco-design/web-vue'
@@ -11,6 +12,7 @@ import ApiConfig from './ApiConfig.vue'
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const loading = ref(false)
 const configs = ref<SyncConfig[]>([])
 const activeConfigId = ref<number | null>(null)
@@ -19,6 +21,16 @@ const isEditing = ref(false)
 const editingConfigId = ref<number | null>(null)
 const activeTab = ref('config')
 const isDarkTheme = computed(() => themeStore.isBlack)
+const pageText = computed(() => isEnglish.value
+  ? {
+      createdBy: 'Created by',
+      createdAt: 'Created at',
+    }
+  : {
+      createdBy: '创建者',
+      createdAt: '创建时间',
+    }
+)
 
 const formModel = ref({
   name: '',
@@ -310,8 +322,8 @@ onMounted(() => {
 
             <template #created_info="{ record }">
               <div class="created-info flex flex-col gap-1 text-sm">
-                <span>创建者：{{ record.created_by_info?.username || '-' }}</span>
-                <span>创建时间：{{ record.created_at ? new Date(record.created_at).toLocaleString() : '-' }}</span>
+                <span>{{ pageText.createdBy }}：{{ record.created_by_info?.username || '-' }}</span>
+                <span>{{ pageText.createdAt }}：{{ record.created_at ? new Date(record.created_at).toLocaleString() : '-' }}</span>
               </div>
             </template>
 

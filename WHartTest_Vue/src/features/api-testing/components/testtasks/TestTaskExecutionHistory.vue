@@ -3,11 +3,13 @@ import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Message } from '@arco-design/web-vue'
 import { useThemeStore } from '@/store/themeStore'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { getTestTaskExecutions, cancelTestTaskExecution, type TestTaskExecution } from '../../services/testTaskService'
 
 const route = useRoute()
 const router = useRouter()
 const themeStore = useThemeStore()
+const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
 const executions = ref<TestTaskExecution[]>([])
 const taskSuiteId = ref<number | null>(null)
@@ -42,6 +44,32 @@ const statusOptions = [
   { label: '已取消', value: 'canceled' },
   { label: '错误', value: 'error' }
 ]
+
+const pageTitle = computed(() => {
+  if (taskSuiteName.value) {
+    return isEnglish.value
+      ? `Execution History of "${taskSuiteName.value}"`
+      : `"${taskSuiteName.value}" 的执行历史`
+  }
+
+  return isEnglish.value ? 'Test Task Execution History' : '测试任务执行历史'
+})
+
+const autoRefreshTooltip = computed(() => {
+  return isEnglish.value
+    ? (autoRefresh.value ? 'Click to turn off auto-refresh' : 'Click to turn on auto-refresh')
+    : (autoRefresh.value ? '点击关闭自动刷新' : '点击开启自动刷新')
+})
+
+const autoRefreshButtonLabel = computed(() => {
+  return isEnglish.value
+    ? (autoRefresh.value ? 'Auto-refresh on' : 'Auto-refresh')
+    : (autoRefresh.value ? '自动刷新中' : '自动刷新')
+})
+
+const totalCasesColumnTitle = computed(() => {
+  return isEnglish.value ? 'Total Cases' : '用例总数'
+})
 
 // 获取测试任务执行历史记录（完整刷新）
 const fetchExecutionHistory = async () => {
@@ -313,12 +341,12 @@ onUnmounted(() => {
     <div class="panel-shell rounded-lg px-6 py-5 flex justify-between items-center">
       <div class="flex items-center gap-2">
         <h2 class="page-title text-xl font-medium">
-          {{ taskSuiteName ? `"${taskSuiteName}" 的执行历史` : '测试任务执行历史' }}
+          {{ pageTitle }}
         </h2>
         <a-tag v-if="taskSuiteId" color="blue">ID: {{ taskSuiteId }}</a-tag>
       </div>
       <div class="flex items-center gap-3">
-        <a-tooltip :content="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'">
+        <a-tooltip :content="autoRefreshTooltip">
           <a-button
             :type="autoRefresh ? 'primary' : 'outline'"
             @click="toggleAutoRefresh"
@@ -327,10 +355,10 @@ onUnmounted(() => {
             <template #icon>
               <icon-sync :spin="autoRefresh" />
             </template>
-            {{ autoRefresh ? '自动刷新中' : '自动刷新' }}
+            {{ autoRefreshButtonLabel }}
           </a-button>
         </a-tooltip>
-        <a-button type="outline" class="back-button" @click="goBack">返回列表</a-button>
+        <a-button type="outline" class="back-button" @click="goBack">{{ tl('返回列表') }}</a-button>
       </div>
     </div>
 
@@ -405,7 +433,7 @@ onUnmounted(() => {
                 <div class="cell-text">{{ formatDuration(record.duration) }}</div>
               </template>
             </a-table-column>
-            <a-table-column title="用例总数" data-index="total_count" :width="100" align="center">
+            <a-table-column :title="totalCasesColumnTitle" data-index="total_count" :width="100" align="center">
               <template #cell="{ record }">
                 <div class="cell-text">{{ record.total_count }}</div>
               </template>

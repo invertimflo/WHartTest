@@ -87,20 +87,20 @@
                   </a-tag>
                 </template>
               </a-table-column>
-              <a-table-column title="执行结果" align="center">
+              <a-table-column title="执行结果" align="center" :width="200">
                 <template #cell="{ record }">
-                  <div class="flex items-center gap-4 justify-center">
-                    <div class="text-center">
+                  <div class="execution-results-cell flex items-center justify-center">
+                    <div class="execution-results-item text-center">
                       <div class="text-sm font-medium text-green-500">{{ record.success_count }}</div>
-                      <div class="text-xs report-subtle-text">成功</div>
+                      <div class="execution-results-label text-xs report-subtle-text">成功</div>
                     </div>
-                    <div class="text-center">
+                    <div class="execution-results-item text-center">
                       <div class="text-sm font-medium text-red-500">{{ record.fail_count }}</div>
-                      <div class="text-xs report-subtle-text">失败</div>
+                      <div class="execution-results-label text-xs report-subtle-text">失败</div>
                     </div>
-                    <div class="text-center">
+                    <div class="execution-results-item text-center">
                       <div class="text-sm font-medium text-orange-500">{{ record.error_count }}</div>
-                      <div class="text-xs report-subtle-text">错误</div>
+                      <div class="execution-results-label text-xs report-subtle-text">错误</div>
                     </div>
                   </div>
                 </template>
@@ -483,6 +483,21 @@ onUnmounted(() => {
 
 .report-muted-text {
   color: var(--tr-text-muted);
+}
+
+.execution-results-cell {
+  gap: 12px;
+  flex-wrap: nowrap;
+  min-width: 176px;
+}
+
+.execution-results-item {
+  min-width: 44px;
+}
+
+.execution-results-label {
+  white-space: nowrap;
+  line-height: 1.2;
 }
 
 .empty-title {

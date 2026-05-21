@@ -1,7 +1,7 @@
 <template>
   <div class="basic-info-shell rounded-lg border">
     <div class="basic-info-header px-4 py-3 border-b">
-      <h3 class="basic-title text-base font-medium">基本信息</h3>
+      <h3 class="basic-title text-base font-medium">{{ text.basicInfo }}</h3>
     </div>
     <div class="basic-info-grid p-4">
       <div class="info-item">
@@ -9,7 +9,7 @@
           <icon-code class="text-lg text-gray-400" />
         </div>
         <div class="info-item__content">
-          <div class="info-item__label">报告ID</div>
+          <div class="info-item__label">{{ text.reportId }}</div>
           <div class="info-item__value">{{ report?.id || '--' }}</div>
         </div>
       </div>
@@ -19,10 +19,10 @@
           <icon-code class="text-lg text-gray-400" />
         </div>
         <div class="info-item__content">
-          <div class="info-item__label">测试用例</div>
+          <div class="info-item__label">{{ text.testCases }}</div>
           <div class="info-item__value">{{ report?.testcase_name || '--' }}</div>
           <div class="info-item__chips">
-            <span class="info-chip">用例ID: {{ report?.testcase || '--' }}</span>
+            <span class="info-chip">{{ text.caseId }}: {{ report?.testcase || '--' }}</span>
           </div>
         </div>
       </div>
@@ -32,7 +32,7 @@
           <icon-calendar class="text-lg text-gray-400" />
         </div>
         <div class="info-item__content">
-          <div class="info-item__label">开始时间</div>
+          <div class="info-item__label">{{ text.startTime }}</div>
           <div class="info-item__value">{{ formatDateTime(report?.start_time) }}</div>
         </div>
       </div>
@@ -42,21 +42,21 @@
           <icon-desktop class="text-lg text-gray-400" />
         </div>
         <div class="info-item__content">
-          <div class="info-item__label">执行环境</div>
-          <div class="info-item__value">{{ report?.environment_info?.name || '未绑定环境' }}</div>
+          <div class="info-item__label">{{ text.executionEnvironment }}</div>
+          <div class="info-item__value">{{ report?.environment_info?.name || text.unboundEnvironment }}</div>
           <div class="info-item__chips">
-            <span class="info-chip">环境ID: {{ report?.environment || '--' }}</span>
+            <span class="info-chip">{{ text.environmentId }}: {{ report?.environment || '--' }}</span>
             <span v-if="report?.environment_info?.project?.name" class="info-chip">
-              项目: {{ report?.environment_info?.project?.name }}
+              {{ text.project }}: {{ report?.environment_info?.project?.name }}
               <template v-if="report?.environment_info?.project?.id">(ID: {{ report?.environment_info?.project?.id }})</template>
             </span>
           </div>
           <div v-if="report?.environment_info?.base_url" class="info-inline-row">
-            <span class="info-inline-key">Base URL</span>
+            <span class="info-inline-key">{{ text.baseUrl }}</span>
             <span class="info-inline-value">{{ report?.environment_info?.base_url }}</span>
           </div>
           <div v-if="report?.environment_info?.description" class="info-item__summary">
-            描述: {{ report?.environment_info?.description }}
+            {{ text.description }}: {{ report?.environment_info?.description }}
           </div>
         </div>
       </div>
@@ -66,17 +66,17 @@
           <icon-user class="text-lg text-gray-400" />
         </div>
         <div class="info-item__content">
-          <div class="info-item__label">执行人</div>
+          <div class="info-item__label">{{ text.executor }}</div>
           <div class="info-item__value">{{ report?.executed_by_info?.username || '--' }}</div>
           <div class="info-item__chips">
-            <span class="info-chip">用户ID: {{ report?.executed_by || '--' }}</span>
-            <span class="info-chip">邮箱: {{ report?.executed_by_info?.email || '未设置' }}</span>
+            <span class="info-chip">{{ text.userId }}: {{ report?.executed_by || '--' }}</span>
+            <span class="info-chip">{{ text.email }}: {{ report?.executed_by_info?.email || text.notSet }}</span>
           </div>
           <div
             v-if="report?.executed_by_info?.first_name || report?.executed_by_info?.last_name"
             class="info-item__summary"
           >
-            姓名: {{ [report?.executed_by_info?.first_name, report?.executed_by_info?.last_name].filter(Boolean).join(' ') }}
+            {{ text.name }}: {{ [report?.executed_by_info?.first_name, report?.executed_by_info?.last_name].filter(Boolean).join(' ') }}
           </div>
         </div>
       </div>
@@ -85,13 +85,56 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { IconCalendar, IconDesktop, IconUser, IconCode } from '@arco-design/web-vue/es/icon'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { formatDateTime } from '@/utils/formatters'
 import type { TestReportResponse } from './TestReportDetail.vue'
 
 defineProps<{
   report: TestReportResponse | null
 }>()
+
+const { isEnglish } = useAppI18n()
+
+const text = computed(() => isEnglish.value
+  ? {
+      basicInfo: 'Basic info',
+      reportId: 'Report ID',
+      testCases: 'Test Cases',
+      caseId: 'Case ID',
+      startTime: 'Start time',
+      executionEnvironment: 'Execution environment',
+      unboundEnvironment: 'Unbound environment',
+      environmentId: 'Environment ID',
+      project: 'Project',
+      baseUrl: 'Base URL',
+      description: 'Description',
+      executor: 'Executor',
+      userId: 'User ID',
+      email: 'Email',
+      notSet: 'Not set',
+      name: 'Name',
+    }
+  : {
+      basicInfo: '基本信息',
+      reportId: '报告ID',
+      testCases: '测试用例',
+      caseId: '用例ID',
+      startTime: '开始时间',
+      executionEnvironment: '执行环境',
+      unboundEnvironment: '未绑定环境',
+      environmentId: '环境ID',
+      project: '项目',
+      baseUrl: 'Base URL',
+      description: '描述',
+      executor: '执行人',
+      userId: '用户ID',
+      email: '邮箱',
+      notSet: '未设置',
+      name: '姓名',
+    }
+)
 </script>
 
 <style scoped>

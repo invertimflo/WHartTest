@@ -54,7 +54,7 @@ const pageText = computed(() => isEnglish.value
 )
 
 const handleExportReport = () => {
-  Message.info('导出功能开发中...')
+  Message.info(isEnglish.value ? 'Export is under development...' : '导出功能开发中...')
 }
 
 const handleBack = () => {

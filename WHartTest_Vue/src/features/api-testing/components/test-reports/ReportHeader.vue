@@ -5,7 +5,7 @@
         <div class="flex items-center gap-4">
           <a-button class="custom-back-button" @click="$emit('back')">
             <template #icon><icon-left /></template>
-            返回
+            {{ text.back }}
           </a-button>
           <div>
             <h2 class="report-title text-xl font-medium">{{ report?.name }}</h2>
@@ -20,11 +20,11 @@
             <a-tag :color="getStatusColor(report?.status)" size="medium">
               {{ getStatusText(report?.status) }}
             </a-tag>
-            <span class="report-subtle-text text-xs mt-1">执行时长: {{ formatDuration(report?.duration) }}</span>
+            <span class="report-subtle-text text-xs mt-1">{{ text.duration }}: {{ formatDisplayDuration(report?.duration) }}</span>
           </div>
           <a-button type="outline" status="success" @click="$emit('export')">
             <template #icon><icon-download /></template>
-            导出报告
+            {{ text.exportReport }}
           </a-button>
         </div>
       </div>
@@ -33,7 +33,9 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { IconLeft, IconCode, IconDownload } from '@arco-design/web-vue/es/icon'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { formatDuration } from '@/utils/formatters'
 import type { TestReportResponse } from './TestReportDetail.vue'
 
@@ -47,6 +49,52 @@ defineEmits<{
   (e: 'export'): void
 }>()
 
+const { isEnglish } = useAppI18n()
+
+const text = computed(() => isEnglish.value
+  ? {
+      back: 'Back',
+      duration: 'Duration',
+      exportReport: 'Export report',
+      success: 'Succeeded',
+      failure: 'Failed',
+      error: 'Error',
+      unknown: 'Unknown',
+    }
+  : {
+      back: '返回',
+      duration: '执行时长',
+      exportReport: '导出报告',
+      success: '成功',
+      failure: '失败',
+      error: '错误',
+      unknown: '未知',
+    }
+)
+
+const formatDisplayDuration = (seconds?: number) => {
+  if (!isEnglish.value) {
+    return formatDuration(seconds)
+  }
+
+  if (seconds === undefined || seconds === null || Number.isNaN(seconds)) {
+    return '-'
+  }
+
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`
+  }
+
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.round(seconds % 60)
+
+  if (remainingSeconds === 0) {
+    return `${minutes}m`
+  }
+
+  return `${minutes}m ${remainingSeconds}s`
+}
+
 const getStatusColor = (status?: string) => {
   const statusMap: Record<string, string> = {
     success: 'green',
@@ -58,11 +106,11 @@ const getStatusColor = (status?: string) => {
 
 const getStatusText = (status?: string) => {
   const statusMap: Record<string, string> = {
-    success: '成功',
-    failure: '失败',
-    error: '错误',
+    success: text.value.success,
+    failure: text.value.failure,
+    error: text.value.error,
   }
-  return statusMap[status || ''] || '未知'
+  return statusMap[status || ''] || text.value.unknown
 }
 </script>
 

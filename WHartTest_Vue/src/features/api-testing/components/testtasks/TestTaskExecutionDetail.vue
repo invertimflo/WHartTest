@@ -237,6 +237,7 @@ onUnmounted(() => {
           v-if="executionData && ['running', 'completed'].includes(executionData.status)"
           :type="executionData.status === 'completed' ? 'primary' : 'outline'"
           :status="executionData.status === 'running' ? 'warning' : 'success'"
+          class="view-results-button"
           @click="viewCaseResults"
         >
           <template #icon>
@@ -464,5 +465,10 @@ onUnmounted(() => {
     @apply !border-gray-500/40 !bg-gray-700/30;
     color: var(--tte-muted) !important;
   }
+}
+
+.view-results-button {
+  min-width: 156px;
+  white-space: nowrap;
 }
 </style>

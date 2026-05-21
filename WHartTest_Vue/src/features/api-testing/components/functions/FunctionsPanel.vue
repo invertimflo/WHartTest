@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue'
 import { Message, Modal, Spin } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import { getFunctions, createFunction, updateFunction, deleteFunction, type Function, getFunctionDetail } from '../../services/functionService'
@@ -10,6 +11,7 @@ import FunctionForm from './FunctionForm.vue'
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const loading = ref(false)
 const formLoading = ref(false)
 const detailLoading = ref(false)
@@ -20,6 +22,14 @@ const editVisible = ref(false)
 const editingFunction = ref<Function | null>(null)
 const globalLoading = ref(false)
 const isDarkTheme = computed(() => themeStore.isBlack)
+const pageText = computed(() => isEnglish.value
+  ? {
+      emptySelection: 'Please select a function on the left or create a new one',
+    }
+  : {
+      emptySelection: '请选择左侧函数或新建函数',
+    }
+)
 
 // 获取函数列表
 const fetchFunctions = async () => {
@@ -315,7 +325,7 @@ onMounted(() => {
           <template v-else>
             <!-- 欢迎页 -->
             <div class="h-full flex items-center justify-center">
-              <a-empty description="请选择左侧函数或新建函数" />
+              <a-empty :description="pageText.emptySelection" />
             </div>
           </template>
         </div>

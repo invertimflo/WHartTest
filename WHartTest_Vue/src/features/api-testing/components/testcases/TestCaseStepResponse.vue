@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useClipboard } from '@vueuse/core'
 import { Message } from '@arco-design/web-vue'
 import { IconCopy } from '@arco-design/web-vue/es/icon'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 interface ResponseData {
   status: number | null
@@ -21,10 +22,11 @@ interface Props {
 
 const props = defineProps<Props>()
 const { copy } = useClipboard()
+const { tl } = useAppI18n()
 
 const copyContent = async (content: string) => {
   await copy(content)
-  Message.success('复制成功')
+  Message.success(tl('复制成功'))
 }
 
 const responseContent = computed(() => {
@@ -58,7 +60,7 @@ const responseActiveTab = ref('response')
   <div v-if="response" class="testcase-step-response h-full flex flex-col">
     <!-- 顶部响应概要 -->
     <div class="response-summary flex items-center gap-4 px-4 pt-4 pb-2 border-t border-b">
-      <div class="response-summary-text">响应内容</div>
+      <div class="response-summary-text">{{ tl('响应内容') }}</div>
       <div class="flex-1"></div>
       <div class="flex items-center gap-4 flex-shrink-0">
         <a-tag v-if="statusCode" :color="statusCode === 200 ? 'green' : 'red'" class="w-10 flex justify-center items-center">
@@ -72,49 +74,49 @@ const responseActiveTab = ref('response')
     <!-- 响应内容页签 -->
     <div class="flex-1 overflow-hidden">
       <a-tabs v-model:active-key="responseActiveTab" class="h-full">
-        <a-tab-pane key="response" title="响应体">
+        <a-tab-pane key="response" :title="tl('响应体')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response.data?.response?.content" class="response-code-block rounded-lg shadow-inner relative group">
-                <div class="copy-button" @click="copyContent(responseContent)" title="复制">
+                <div class="copy-button" @click="copyContent(responseContent)" :title="tl('复制')">
                   <icon-copy />
                 </div>
                 <pre class="response-code-text p-4 font-mono text-sm leading-6 whitespace-pre-wrap break-all text-left">{{ responseContent }}</pre>
               </div>
-              <a-empty v-else description="暂无响应数据" />
+              <a-empty v-else :description="tl('暂无响应数据')" />
             </div>
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="headers" title="响应头">
+        <a-tab-pane key="headers" :title="tl('响应头')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response.data?.response?.headers" class="response-code-block rounded-lg shadow-inner relative group">
-                <div class="copy-button" @click="copyContent(responseHeadersContent)" title="复制">
+                <div class="copy-button" @click="copyContent(responseHeadersContent)" :title="tl('复制')">
                   <icon-copy />
                 </div>
                 <pre class="response-code-text p-4 font-mono text-sm leading-6 whitespace-pre-wrap break-all text-left">{{ responseHeadersContent }}</pre>
               </div>
-              <a-empty v-else description="暂无响应头数据" />
+              <a-empty v-else :description="tl('暂无响应头数据')" />
             </div>
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="request" title="请求信息">
+        <a-tab-pane key="request" :title="tl('请求信息')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response.data?.request" class="response-code-block rounded-lg shadow-inner relative group">
-                <div class="copy-button" @click="copyContent(requestContent)" title="复制">
+                <div class="copy-button" @click="copyContent(requestContent)" :title="tl('复制')">
                   <icon-copy />
                 </div>
                 <pre class="response-code-text p-4 font-mono text-sm leading-6 whitespace-pre-wrap break-all text-left">{{ requestContent }}</pre>
               </div>
-              <a-empty v-else description="暂无请求数据" />
+              <a-empty v-else :description="tl('暂无请求数据')" />
             </div>
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="validation" title="验证结果">
+        <a-tab-pane key="validation" :title="tl('验证结果')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response.data?.validation_results?.length" class="response-code-block rounded-lg shadow-inner p-4">
@@ -125,19 +127,19 @@ const responseActiveTab = ref('response')
                   <div class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-2">
                       <a-tag :color="result.check_result === 'pass' ? 'green' : 'red'" class="!font-medium !flex-shrink-0">
-                        {{ result.check_result === 'pass' ? '通过' : '失败' }}
+                        {{ result.check_result === 'pass' ? tl('通过') : tl('失败') }}
                       </a-tag>
                       <span class="response-code-text">{{ result.comparator }}: {{ result.check }}</span>
                     </div>
                   </div>
                   <div class="ml-1 flex flex-col gap-2">
                     <div class="flex flex-col gap-1">
-                      <div class="response-summary-text text-sm">实际值:
+                      <div class="response-summary-text text-sm">{{ tl('实际值:') }}
                         <span class="response-code-text font-mono">{{ result.check_value }}</span>
                       </div>
                     </div>
                     <div class="flex flex-col gap-1">
-                      <div class="response-summary-text text-sm">期望值:
+                      <div class="response-summary-text text-sm">{{ tl('期望值:') }}
                         <span class="response-code-text font-mono">{{ result.expect_value }}</span>
                       </div>
                     </div>
@@ -145,12 +147,12 @@ const responseActiveTab = ref('response')
                   </div>
                 </div>
               </div>
-              <a-empty v-else description="暂无验证结果" />
+              <a-empty v-else :description="tl('暂无验证结果')" />
             </div>
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="variables" title="提取变量">
+        <a-tab-pane key="variables" :title="tl('提取变量')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response.data?.extracted_variables" class="response-code-block rounded-lg shadow-inner p-4">
@@ -163,21 +165,21 @@ const responseActiveTab = ref('response')
                   <div class="response-code-text mt-2 font-mono text-sm break-all">{{ value }}</div>
                 </div>
               </div>
-              <a-empty v-else description="暂无提取变量" />
+              <a-empty v-else :description="tl('暂无提取变量')" />
             </div>
           </div>
         </a-tab-pane>
 
-        <a-tab-pane key="complete" title="完整数据">
+        <a-tab-pane key="complete" :title="tl('完整数据')">
           <div class="h-full overflow-auto text-left">
             <div class="p-4">
               <div v-if="response" class="response-code-block rounded-lg shadow-inner relative group">
-                <div class="copy-button" @click="copyContent(completeContent)" title="复制">
+                <div class="copy-button" @click="copyContent(completeContent)" :title="tl('复制')">
                   <icon-copy />
                 </div>
                 <pre class="response-code-text p-4 font-mono text-sm leading-6 whitespace-pre-wrap break-all text-left">{{ completeContent }}</pre>
               </div>
-              <a-empty v-else description="暂无响应数据" />
+              <a-empty v-else :description="tl('暂无响应数据')" />
             </div>
           </div>
         </a-tab-pane>
@@ -188,7 +190,7 @@ const responseActiveTab = ref('response')
   <!-- 无响应时的提示 -->
   <div v-else class="testcase-step-response h-full flex flex-col">
     <div class="response-summary flex items-center gap-4 px-4 pt-4 pb-2 border-t border-b">
-      <div class="response-summary-text">响应内容</div>
+      <div class="response-summary-text">{{ tl('响应内容') }}</div>
     </div>
     <div class="flex-1 flex items-center justify-center">
       <div class="response-empty flex flex-col items-center justify-center">
@@ -198,8 +200,8 @@ const responseActiveTab = ref('response')
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z" />
           </svg>
         </div>
-        <div class="text-base">暂无响应数据</div>
-        <div class="text-sm mt-2">点击调试按钮发送请求</div>
+        <div class="text-base">{{ tl('暂无响应数据') }}</div>
+        <div class="text-sm mt-2">{{ tl('点击调试按钮发送请求') }}</div>
       </div>
     </div>
   </div>

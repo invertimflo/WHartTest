@@ -18,6 +18,7 @@ import {
 import EnvironmentVariableForm from './EnvironmentVariableForm.vue'
 import EnvironmentVariableList from './EnvironmentVariableList.vue'
 import type { FormInstance } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 
 interface Props {
@@ -45,6 +46,34 @@ interface Emits {
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 const projectStore = useProjectStore()
+const { isEnglish } = useAppI18n()
+
+const formText = computed(() => isEnglish.value
+  ? {
+      loadingDatabaseConfigs: 'Loading database configs...',
+      noDatabaseConfigs: 'No database configs',
+      noLinkedDatabase: 'No linked database',
+      enableEnvironment: 'Enable environment',
+      disableEnvironment: 'Disable environment',
+      guide: 'Guide',
+      guideLine1: 'Variable names must be unique and valid identifiers',
+      guideLine2: 'Both variable name and value are required',
+      guideLine3: 'Link a database config to access it in test cases',
+      databaseConfigId: 'Database Config ID',
+    }
+  : {
+      loadingDatabaseConfigs: '正在加载数据库配置...',
+      noDatabaseConfigs: '无数据库配置',
+      noLinkedDatabase: '不关联数据库',
+      enableEnvironment: '启用环境',
+      disableEnvironment: '禁用环境',
+      guide: '使用说明',
+      guideLine1: '变量名不能重复，且必须是有效的标识符',
+      guideLine2: '变量名和变量值都是必填项',
+      guideLine3: '关联数据库配置后，您可以在测试用例中访问该数据库',
+      databaseConfigId: '数据库配置 ID',
+    }
+)
 
 // 检查并保证database_config值的一致性
 if (props.modelValue.database_config !== null && 
@@ -176,7 +205,7 @@ const fetchDatabaseConfigs = async () => {
 
 // 格式化数据库选择器显示内容
 const formatDatabaseSelection = (value: number | null | string) => {
-  if (!value || value === "null") return '不关联数据库';
+  if (!value || value === "null") return formText.value.noLinkedDatabase;
   
   console.log('格式化数据库选择器显示内容，当前值:', value, '类型:', typeof value);
   
@@ -208,7 +237,7 @@ const formatDatabaseSelection = (value: number | null | string) => {
     return env.database_config_info.name;
   }
   
-  return `数据库配置 ID: ${value}`;
+  return `${formText.value.databaseConfigId}: ${value}`;
 }
 
 // 添加创建时的日志
@@ -646,10 +675,10 @@ const handleSubmit = async () => {
                     </template>
                     <template #empty>
                       <div class="text-center p-2 form-text-subtle">
-                        {{ loadingDatabaseConfigs ? '正在加载数据库配置...' : '无数据库配置' }}
+                        {{ loadingDatabaseConfigs ? formText.loadingDatabaseConfigs : formText.noDatabaseConfigs }}
                       </div>
                     </template>
-                    <a-option value="null" label="不关联数据库">不关联数据库</a-option>
+                    <a-option value="null" :label="formText.noLinkedDatabase">{{ formText.noLinkedDatabase }}</a-option>
                     
                     <template v-if="databaseConfigs.length > 0">
                       <a-option
@@ -681,7 +710,7 @@ const handleSubmit = async () => {
                 <a-form-item field="is_active" class="!mb-0">
                   <div class="toggle-card flex items-center gap-3 p-3 rounded-lg">
                     <a-switch v-model="modelValue.is_active" class="!scale-110" />
-                    <span class="form-text-muted">{{ modelValue.is_active ? '启用环境' : '禁用环境' }}</span>
+                    <span class="form-text-muted">{{ modelValue.is_active ? formText.enableEnvironment : formText.disableEnvironment }}</span>
                   </div>
                 </a-form-item>
               </div>
@@ -691,20 +720,20 @@ const handleSubmit = async () => {
             <div class="help-card p-4 rounded-xl">
               <div class="flex items-center gap-2 mb-2">
                 <icon-info-circle class="form-text-subtle" />
-                <span class="text-sm font-medium form-text-muted">使用说明</span>
+                <span class="text-sm font-medium form-text-muted">{{ formText.guide }}</span>
               </div>
               <ul class="text-xs form-text-subtle space-y-1.5">
                 <li class="flex items-center gap-2">
                   <div class="helper-dot w-1 h-1 rounded-full"></div>
-                  <span>变量名不能重复，且必须是有效的标识符</span>
+                  <span>{{ formText.guideLine1 }}</span>
                 </li>
                 <li class="flex items-center gap-2">
                   <div class="helper-dot w-1 h-1 rounded-full"></div>
-                  <span>变量名和变量值都是必填项</span>
+                  <span>{{ formText.guideLine2 }}</span>
                 </li>
                 <li class="flex items-center gap-2">
                   <div class="helper-dot w-1 h-1 rounded-full"></div>
-                  <span>关联数据库配置后，您可以在测试用例中访问该数据库</span>
+                  <span>{{ formText.guideLine3 }}</span>
                 </li>
               </ul>
             </div>

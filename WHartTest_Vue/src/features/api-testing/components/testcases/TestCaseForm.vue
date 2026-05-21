@@ -13,6 +13,8 @@ import TestCaseHeader from './TestCaseHeader.vue'
 import TestCaseStepList from './TestCaseStepList.vue'
 import TestCaseStepDetail from './TestCaseStepDetail.vue'
 import ExecutionSteps from '../test-reports/ExecutionSteps.vue'
+import { showExtractPersistenceNotice } from '../../utils/extractPersistence'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 interface Props {
   projectId: number
@@ -27,6 +29,7 @@ const emit = defineEmits(['cancel', 'success', 'update:testCaseId'])
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { tl } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
 
 const currentTestCaseId = ref<number | undefined>(props.testCaseId)
@@ -140,7 +143,7 @@ const fetchTestCaseDetail = async () => {
       const res = await testcaseService.get(projectStore.currentProjectId, testCaseId.value)
 
       if (!res.success || !res.data) {
-        throw new Error(res.error || '获取用例详情失败')
+        throw new Error(res.error || tl('获取用例详情失败'))
       }
 
       const testCase = res.data as any
@@ -162,7 +165,7 @@ const fetchTestCaseDetail = async () => {
       updateSteps(testCase.steps || [])
     } catch (error) {
       console.error('获取用例详情失败:', error)
-      Message.error(error instanceof Error ? error.message : '获取用例详情失败')
+      Message.error(error instanceof Error ? error.message : tl('获取用例详情失败'))
     } finally {
       loading.value = false
     }
@@ -293,11 +296,11 @@ const handleTestCaseRefresh = (testCase: { steps?: TestCaseStep[] }) => {
 
 const validateForm = () => {
   if (!formData.name) {
-    Message.error('请输入用例名称')
+    Message.error(tl('请输入用例名称'))
     return false
   }
   if (!formData.priority) {
-    Message.error('请选择优先级')
+    Message.error(tl('请选择优先级'))
     return false
   }
   return true
@@ -325,15 +328,15 @@ const handleSubmit = async (continueAction?: () => void) => {
     if (props.mode === 'edit' && testCaseId.value) {
       const res = await testcaseService.update(projectStore.currentProjectId, testCaseId.value, submitData as any)
       if (res.success) {
-        Message.success('更新成功')
+        Message.success(tl('更新成功'))
         await fetchTestCaseDetail()
       } else {
-        throw new Error(res.error || '更新失败')
+        throw new Error(res.error || tl('更新失败'))
       }
     } else {
       const res = await testcaseService.create(projectStore.currentProjectId, submitData as any)
       if (res.success && res.data) {
-        Message.success('创建成功，现在您可以添加测试步骤了')
+        Message.success(tl('创建成功，现在您可以添加测试步骤了'))
         const newId = (res.data as any).id
         if (newId) {
           currentTestCaseId.value = newId
@@ -341,7 +344,7 @@ const handleSubmit = async (continueAction?: () => void) => {
           emit('success', { id: newId, mode: 'created' })
         }
       } else {
-        throw new Error(res.error || '创建失败')
+        throw new Error(res.error || tl('创建失败'))
       }
     }
 
@@ -351,7 +354,7 @@ const handleSubmit = async (continueAction?: () => void) => {
 
     return true
   } catch (error) {
-    Message.error(props.mode === 'edit' ? '更新失败' : '创建失败')
+    Message.error(tl(props.mode === 'edit' ? '更新失败' : '创建失败'))
     return false
   } finally {
     loading.value = false
@@ -396,7 +399,8 @@ const handleRun = async (data: { testCaseId: number, environmentId: number }) =>
     })
 
     if (res.success && res.data) {
-      Message.success('用例运行成功')
+      showExtractPersistenceNotice((res.data as any).extract_persistence)
+      Message.success(tl('用例运行成功'))
       const reportId = (res.data as any).report_id
       if (reportId) {
         await fetchReportDetail(Number(reportId))
@@ -412,15 +416,15 @@ const handleRun = async (data: { testCaseId: number, environmentId: number }) =>
         if (reports.length > 0) {
           await fetchReportDetail(reports[0].id)
         } else {
-          Message.warning('获取运行结果失败，请前往报告列表查看')
+          Message.warning(tl('获取运行结果失败，请前往报告列表查看'))
         }
       }
     } else {
-      throw new Error(res.error || '运行用例失败')
+      throw new Error(res.error || tl('运行用例失败'))
     }
   } catch (error) {
     console.error('运行用例失败:', error)
-    Message.error(error instanceof Error ? error.message : '运行用例失败')
+    Message.error(error instanceof Error ? error.message : tl('运行用例失败'))
   } finally {
     runResultLoading.value = false
   }
@@ -436,11 +440,11 @@ const fetchReportDetail = async (reportId: number) => {
       showReport.value = true
       activeStep.value = null
     } else {
-      Message.error('获取报告详情失败')
+      Message.error(tl('获取报告详情失败'))
     }
   } catch (error) {
     console.error('获取报告详情失败:', error)
-    Message.error('获取报告详情失败，请稍后重试')
+    Message.error(tl('获取报告详情失败，请稍后重试'))
   } finally {
     reportLoading.value = false
   }
@@ -459,13 +463,13 @@ const handleShowReport = async (tcId: number) => {
       if (reports.length > 0) {
         await fetchReportDetail(reports[0].id)
       } else {
-        Message.warning('该测试用例暂无报告，请先运行测试')
+        Message.warning(tl('该测试用例暂无报告，请先运行测试'))
         showReport.value = false
       }
     }
   } catch (error) {
     console.error('获取报告列表失败:', error)
-    Message.error('获取报告列表失败，请稍后重试')
+    Message.error(tl('获取报告列表失败，请稍后重试'))
   } finally {
     reportLoading.value = false
   }
@@ -559,7 +563,7 @@ const handleShowReport = async (tcId: number) => {
 
         <!-- 空状态 -->
         <div v-else class="flex items-center justify-center h-full empty-text">
-          {{ showReport ? '暂无报告数据' : (readonly ? '请选择步骤查看详情' : '请选择或添加步骤') }}
+          {{ showReport ? tl('暂无报告数据') : (readonly ? tl('请选择步骤查看详情') : tl('请选择或添加步骤')) }}
         </div>
       </div>
     </div>

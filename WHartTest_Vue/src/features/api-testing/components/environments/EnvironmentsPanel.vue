@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { Message } from '@arco-design/web-vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useProjectStore } from '@/store/projectStore'
 import { useThemeStore } from '@/store/themeStore'
 import {
@@ -32,6 +33,7 @@ import {
 
 const projectStore = useProjectStore()
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const loading = ref(false)
 const formLoading = ref(false)
 const environments = ref<Environment[]>([])
@@ -43,6 +45,20 @@ const showDatabaseConfig = ref(false)
 const globalHeadersPanel = ref<{ handleCreate: () => void } | null>(null)
 const databaseConfigPanel = ref<{ handleCreate: () => void } | null>(null)
 const isDarkTheme = computed(() => themeStore.isBlack)
+const actionText = computed(() => isEnglish.value
+  ? {
+      saveEnvironment: 'Save Environment',
+      saveChanges: 'Save Changes',
+      addHeader: 'Add Header',
+      addConfig: 'Add Config',
+    }
+  : {
+      saveEnvironment: '保存环境',
+      saveChanges: '保存更改',
+      addHeader: '添加请求头',
+      addConfig: '添加配置',
+    }
+)
 
 interface FormData {
   id?: number
@@ -562,7 +578,7 @@ onMounted(() => {
             <div class="flex items-center gap-2">
               <a-button type="primary" size="small" @click="handleCreate">
                 <template #icon><IconPlus /></template>
-                保存环境
+                {{ actionText.saveEnvironment }}
               </a-button>
               <a-button type="outline" size="small" @click="activeTab = 'list'">
                 返回
@@ -593,7 +609,7 @@ onMounted(() => {
             <div class="flex items-center gap-2">
               <a-button type="primary" size="small" @click="handleEditSubmit">
                 <template #icon><IconEdit /></template>
-                保存更改
+                {{ actionText.saveChanges }}
               </a-button>
               <a-button type="outline" size="small" @click="activeTab = 'detail'">
                 返回
@@ -837,7 +853,7 @@ onMounted(() => {
             <div class="flex gap-2">
               <a-button type="primary" size="small" @click="globalHeadersPanel?.handleCreate?.()">
                 <template #icon><IconPlus /></template>
-                添加请求头
+                {{ actionText.addHeader }}
               </a-button>
               <a-button type="outline" size="small" @click="activeTab = 'list'">
                 返回
@@ -867,7 +883,7 @@ onMounted(() => {
             <div class="flex gap-2">
               <a-button type="primary" size="small" @click="databaseConfigPanel?.handleCreate?.()">
                 <template #icon><IconPlus /></template>
-                添加配置
+                {{ actionText.addConfig }}
               </a-button>
               <a-button type="outline" size="small" @click="activeTab = 'list'">
                 返回

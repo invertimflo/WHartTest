@@ -4,6 +4,7 @@ import { Message } from '@arco-design/web-vue'
 import type { Function } from '../../services/functionService'
 import { testFunction } from '../../services/functionService'
 import MonacoEditor from '@guolao/vue-monaco-editor'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useThemeStore } from '@/store/themeStore'
 
 const props = defineProps<{
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 
 const form = ref({
   name: props.initialValues?.name || '',
@@ -29,6 +31,55 @@ const testArgs = ref('{}')
 const testLoading = ref(false)
 const testResult = ref('')
 const editorTheme = computed(() => (themeStore.isBlack ? 'vs-dark' : 'vs'))
+
+const text = computed(() => isEnglish.value
+  ? {
+      createFunction: 'Create Function',
+      editFunction: 'Edit Function',
+      cancel: 'Cancel',
+      create: 'Create',
+      save: 'Save',
+      functionName: 'Function Name',
+      enterFunctionName: 'Enter function name',
+      functionDescription: 'Function Description',
+      enterFunctionDescription: 'Enter function description',
+      functionCode: 'Function Code',
+      functionTest: 'Function Test',
+      runTest: 'Run Test',
+      testArgsJson: 'Test Arguments (JSON Format)',
+      testResult: 'Test Result',
+      enterFunctionNameWarning: 'Please enter a function name',
+      enterFunctionCodeWarning: 'Please enter function code',
+      enterFunctionCodeFirst: 'Please enter function code first',
+      invalidTestArgs: 'Invalid test arguments format. Please enter valid JSON',
+      emptyTestResult: 'Test result is empty',
+      testRunSuccess: 'Test ran successfully',
+      testRunFailed: 'Test run failed',
+    }
+  : {
+      createFunction: '新建函数',
+      editFunction: '编辑函数',
+      cancel: '取消',
+      create: '创建',
+      save: '保存',
+      functionName: '函数名称',
+      enterFunctionName: '请输入函数名称',
+      functionDescription: '函数描述',
+      enterFunctionDescription: '请输入函数描述',
+      functionCode: '函数代码',
+      functionTest: '函数测试',
+      runTest: '运行测试',
+      testArgsJson: '测试参数 (JSON格式)',
+      testResult: '测试结果',
+      enterFunctionNameWarning: '请输入函数名称',
+      enterFunctionCodeWarning: '请输入函数代码',
+      enterFunctionCodeFirst: '请先输入函数代码',
+      invalidTestArgs: '测试参数格式不正确，请输入有效的JSON',
+      emptyTestResult: '测试结果为空',
+      testRunSuccess: '测试运行成功',
+      testRunFailed: '测试运行失败',
+    }
+)
 
 const codeEditorOptions = {
   minimap: { enabled: true },
@@ -47,11 +98,11 @@ const codeEditorOptions = {
 
 const handleSubmit = () => {
   if (!form.value.name.trim()) {
-    Message.warning('请输入函数名称')
+    Message.warning(text.value.enterFunctionNameWarning)
     return
   }
   if (!form.value.code.trim()) {
-    Message.warning('请输入函数代码')
+    Message.warning(text.value.enterFunctionCodeWarning)
     return
   }
   emit('submit', form.value)
@@ -59,7 +110,7 @@ const handleSubmit = () => {
 
 const handleTest = async () => {
   if (!form.value.code.trim()) {
-    Message.warning('请先输入函数代码')
+    Message.warning(text.value.enterFunctionCodeFirst)
     return
   }
 
@@ -67,7 +118,7 @@ const handleTest = async () => {
   try {
     parsedArgs = JSON.parse(testArgs.value)
   } catch (error) {
-    Message.error('测试参数格式不正确，请输入有效的JSON')
+    Message.error(text.value.invalidTestArgs)
     return
   }
 
@@ -78,12 +129,12 @@ const handleTest = async () => {
       test_args: parsedArgs
     })
     
-    testResult.value = response.data?.result || '测试结果为空'
-    Message.success('测试运行成功')
+    testResult.value = response.data?.result || text.value.emptyTestResult
+    Message.success(text.value.testRunSuccess)
   } catch (error: any) {
     console.error('测试运行失败:', error)
-    testResult.value = error.response?.data?.message || '测试运行失败'
-    Message.error(error.response?.data?.message || '测试运行失败')
+    testResult.value = error.response?.data?.message || text.value.testRunFailed
+    Message.error(error.response?.data?.message || text.value.testRunFailed)
   } finally {
     testLoading.value = false
   }
@@ -96,11 +147,11 @@ const handleTest = async () => {
     <div class="form-header px-6 py-4 border-b">
       <div class="flex justify-between items-center">
         <h2 class="text-xl font-semibold form-title">
-          {{ mode === 'create' ? '新建函数' : '编辑函数' }}
+          {{ mode === 'create' ? text.createFunction : text.editFunction }}
         </h2>
         <div class="flex gap-2">
           <a-button @click="emit('cancel')" class="secondary-button">
-            取消
+            {{ text.cancel }}
           </a-button>
           <a-button
             type="primary"
@@ -108,7 +159,7 @@ const handleTest = async () => {
             @click="handleSubmit"
             class="!bg-blue-500 !border-blue-500 hover:!bg-blue-600 hover:!border-blue-600"
           >
-            {{ mode === 'create' ? '创建' : '保存' }}
+            {{ mode === 'create' ? text.create : text.save }}
           </a-button>
         </div>
       </div>
@@ -120,17 +171,17 @@ const handleTest = async () => {
         <a-form :model="form" layout="vertical">
           <!-- 基本信息 -->
           <div class="grid grid-cols-2 gap-4 mb-6">
-            <a-form-item field="name" label="函数名称" class="!mb-0">
+            <a-form-item field="name" :label="text.functionName" class="!mb-0">
               <a-input
                 v-model="form.name"
-                placeholder="请输入函数名称"
+                :placeholder="text.enterFunctionName"
                 class="field-control"
               />
             </a-form-item>
-            <a-form-item field="description" label="函数描述" class="!mb-0">
+            <a-form-item field="description" :label="text.functionDescription" class="!mb-0">
               <a-input
                 v-model="form.description"
-                placeholder="请输入函数描述"
+                :placeholder="text.enterFunctionDescription"
                 class="field-control"
               />
             </a-form-item>
@@ -138,7 +189,7 @@ const handleTest = async () => {
 
           <!-- 代码编辑器 -->
           <div class="mb-6">
-            <div class="section-title mb-2 text-sm">函数代码</div>
+            <div class="section-title mb-2 text-sm">{{ text.functionCode }}</div>
             <div class="editor-shell">
               <MonacoEditor
                 v-model:value="form.code"
@@ -153,7 +204,7 @@ const handleTest = async () => {
           <!-- 测试区域 -->
           <div class="test-shell rounded-lg p-4">
             <div class="flex justify-between items-center mb-4">
-              <h3 class="text-base font-medium section-title">函数测试</h3>
+              <h3 class="text-base font-medium section-title">{{ text.functionTest }}</h3>
               <a-button
                 type="primary"
                 size="small"
@@ -161,12 +212,12 @@ const handleTest = async () => {
                 @click="handleTest"
                 class="!bg-purple-500 !border-purple-500 hover:!bg-purple-600 hover:!border-purple-600"
               >
-                运行测试
+                {{ text.runTest }}
               </a-button>
             </div>
             
             <div class="mb-4">
-              <div class="text-sm helper-text mb-2">测试参数 (JSON格式)</div>
+              <div class="text-sm helper-text mb-2">{{ text.testArgsJson }}</div>
               <a-textarea
                 v-model="testArgs"
                 placeholder='{"arg1": "value1"}'
@@ -176,7 +227,7 @@ const handleTest = async () => {
             </div>
 
             <div v-if="testResult">
-              <div class="text-sm helper-text mb-2">测试结果</div>
+              <div class="text-sm helper-text mb-2">{{ text.testResult }}</div>
               <a-textarea
                 v-model="testResult"
                 :style="{ height: '150px' }"

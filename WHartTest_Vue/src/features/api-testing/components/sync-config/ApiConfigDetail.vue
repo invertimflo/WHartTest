@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ApiSyncConfig } from '../../services/syncService'
+import { useAppI18n } from '@/composables/useAppI18n'
 import { useThemeStore } from '@/store/themeStore'
 
 const props = defineProps<{
@@ -14,7 +15,53 @@ const emit = defineEmits<{
 }>()
 
 const themeStore = useThemeStore()
+const { isEnglish } = useAppI18n()
 const isDarkTheme = computed(() => themeStore.isBlack)
+
+const text = computed(() => isEnglish.value
+  ? {
+      detailTitle: 'Sync Config Details',
+      basicInfo: 'Basic Info',
+      interfaceName: 'Interface Name:',
+      testCaseName: 'Test Case Name:',
+      stepName: 'Step Name:',
+      createdBy: 'Created by:',
+      statusInfo: 'Status Info',
+      syncMode: 'Sync Mode:',
+      autoSync: 'Auto Sync',
+      manualSync: 'Manual Sync',
+      syncStatus: 'Sync Status:',
+      enabled: 'Enabled',
+      disabled: 'Disabled',
+      createdAt: 'Created At:',
+      updatedAt: 'Updated At:',
+      syncFields: 'Sync Fields',
+      watchFields: 'Watch Fields',
+    }
+  : {
+      detailTitle: '同步配置详情',
+      basicInfo: '基本信息',
+      interfaceName: '接口名称：',
+      testCaseName: '用例名称：',
+      stepName: '步骤名称：',
+      createdBy: '创建者：',
+      statusInfo: '状态信息',
+      syncMode: '同步模式：',
+      autoSync: '自动同步',
+      manualSync: '手动同步',
+      syncStatus: '同步状态：',
+      enabled: '已启用',
+      disabled: '已禁用',
+      createdAt: '创建时间：',
+      updatedAt: '更新时间：',
+      syncFields: '同步字段',
+      watchFields: '监视字段',
+    }
+)
+
+const detailWideLabelClass = computed(() => isEnglish.value ? 'w-[7rem]' : 'w-[4.5rem]')
+const detailCreatorLabelClass = computed(() => isEnglish.value ? 'w-[6rem]' : 'w-[3.75rem]')
+const detailTimeLabelClass = computed(() => isEnglish.value ? 'w-[6.25rem]' : 'w-[4.25rem]')
 
 const handleClose = () => {
   emit('update:visible', false)
@@ -24,7 +71,7 @@ const handleClose = () => {
 <template>
   <a-modal
     :visible="visible"
-    title="同步配置详情"
+    :title="text.detailTitle"
     :width="780"
     :modal-class="isDarkTheme ? 'api-config-detail-modal api-config-detail-modal--dark' : 'api-config-detail-modal api-config-detail-modal--light'"
     @ok="handleClose"
@@ -34,48 +81,48 @@ const handleClose = () => {
     <div class="detail-card p-4 rounded-lg mb-6">
       <div class="grid grid-cols-2 gap-8">
         <div>
-          <div class="detail-title text-base font-medium mb-4">基本信息</div>
+          <div class="detail-title text-base font-medium mb-4">{{ text.basicInfo }}</div>
           <div class="space-y-4">
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.5rem]">接口名称：</span>
+              <span class="detail-label" :class="detailWideLabelClass">{{ text.interfaceName }}</span>
               <span class="detail-value">{{ config?.interface_info?.name }}</span>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.5rem]">用例名称：</span>
+              <span class="detail-label" :class="detailWideLabelClass">{{ text.testCaseName }}</span>
               <span class="detail-value">{{ config?.testcase_info?.name }}</span>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.5rem]">步骤名称：</span>
+              <span class="detail-label" :class="detailWideLabelClass">{{ text.stepName }}</span>
               <span class="detail-value">{{ config?.step_info?.name }}</span>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[3.75rem]">创建者：</span>
+              <span class="detail-label" :class="detailCreatorLabelClass">{{ text.createdBy }}</span>
               <span class="detail-value">{{ config?.created_by_info?.username || '-' }}</span>
             </div>
           </div>
         </div>
 
         <div>
-          <div class="detail-title text-base font-medium mb-4">状态信息</div>
+          <div class="detail-title text-base font-medium mb-4">{{ text.statusInfo }}</div>
           <div class="space-y-4">
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.5rem]">同步模式：</span>
+              <span class="detail-label" :class="detailWideLabelClass">{{ text.syncMode }}</span>
               <a-tag color="arcoblue" size="medium" class="rounded-md">
-                {{ config?.sync_mode === 'auto' ? '自动同步' : '手动同步' }}
+                {{ config?.sync_mode === 'auto' ? text.autoSync : text.manualSync }}
               </a-tag>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.5rem]">同步状态：</span>
+              <span class="detail-label" :class="detailWideLabelClass">{{ text.syncStatus }}</span>
               <a-tag :color="config?.sync_enabled ? 'green' : 'red'" size="medium" class="rounded-md">
-                {{ config?.sync_enabled ? '已启用' : '已禁用' }}
+                {{ config?.sync_enabled ? text.enabled : text.disabled }}
               </a-tag>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.25rem]">创建时间：</span>
+              <span class="detail-label" :class="detailTimeLabelClass">{{ text.createdAt }}</span>
               <span class="detail-value">{{ config?.created_at ? new Date(config.created_at).toLocaleString() : '-' }}</span>
             </div>
             <div class="flex items-center gap-3">
-              <span class="detail-label w-[4.25rem]">更新时间：</span>
+              <span class="detail-label" :class="detailTimeLabelClass">{{ text.updatedAt }}</span>
               <span class="detail-value">{{ config?.updated_at ? new Date(config.updated_at).toLocaleString() : '-' }}</span>
             </div>
           </div>
@@ -86,7 +133,7 @@ const handleClose = () => {
     <template v-if="config">
       <div class="space-y-6">
         <div class="detail-card p-4 rounded-lg">
-          <div class="detail-title text-base font-medium mb-4">同步字段</div>
+          <div class="detail-title text-base font-medium mb-4">{{ text.syncFields }}</div>
           <div class="flex flex-wrap gap-2">
             <template v-for="field in config.sync_fields" :key="field">
               <a-tag color="arcoblue" size="medium" class="rounded-md">
@@ -97,7 +144,7 @@ const handleClose = () => {
         </div>
 
         <div v-if="config.sync_mode === 'auto'" class="detail-card p-4 rounded-lg">
-          <div class="detail-title text-base font-medium mb-4">监视字段</div>
+          <div class="detail-title text-base font-medium mb-4">{{ text.watchFields }}</div>
           <div class="flex flex-wrap gap-2">
             <template v-for="field in config.sync_trigger?.fields_to_watch" :key="field">
               <a-tag color="arcoblue" size="medium" class="rounded-md">

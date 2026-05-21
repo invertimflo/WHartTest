@@ -295,6 +295,10 @@ nltk>=3.8.0
 # https://github.com/websocket-client/websocket-client/blob/master/LICENSE
 websocket-client>=1.6.0
 
+# 文件监控自动重启工具 - Apache 2.0许可证 (提供 watchmedo 命令)
+# https://github.com/gorakhargosh/watchdog/blob/master/LICENSE
+watchdog==6.0.0
+
 # === API 自动化测试 (TestRunner 集成) 依赖 ===
 
 # JSON Path 查询 - MIT许可证 (用于接口响应变量提取)

@@ -8,6 +8,7 @@ import { Message } from '@arco-design/web-vue'
 import draggable from 'vuedraggable'
 import { ref } from 'vue'
 import ApiSelectDialog from './ApiSelectDialog.vue'
+import { useAppI18n } from '@/composables/useAppI18n'
 
 type Step = TestCaseStep
 
@@ -43,6 +44,24 @@ const apiSelectVisible = ref(false)
 const isDragging = ref(false)
 const draggedStep = ref<Step | null>(null)
 const originalOrder = ref<number>(0)
+const { isEnglish, tl } = useAppI18n()
+
+const formatCountLabel = (count: number, zhUnit: string, enSingular: string, enPlural = `${enSingular}s`) => {
+  return isEnglish.value ? `${count} ${count === 1 ? enSingular : enPlural}` : `${count}${zhUnit}`
+}
+
+const translateStepName = (name: string) => {
+  if (name === '自定义接口') {
+    return isEnglish.value ? 'Custom API' : name
+  }
+
+  const stepMatch = name.match(/^步骤\s*(\d+)$/)
+  if (stepMatch) {
+    return isEnglish.value ? `Step ${stepMatch[1]}` : `步骤${stepMatch[1]}`
+  }
+
+  return tl(name)
+}
 
 const stepTypes = [
   { label: '引用接口', value: 'reference', icon: '↓' },
@@ -165,7 +184,7 @@ const handleApiSelect = async (selectedInterfaces: ApiInterface[]) => {
     }
 
     const response = await addTestCaseSteps(props.testCaseId!, testCaseData)
-    Message.success('添加步骤成功')
+    Message.success(tl('添加步骤成功'))
 
     emit('update:steps', response.data.steps)
 
@@ -176,7 +195,7 @@ const handleApiSelect = async (selectedInterfaces: ApiInterface[]) => {
     apiSelectVisible.value = false
   } catch (error) {
     console.error('Failed to add steps:', error)
-    Message.error('添加步骤失败')
+    Message.error(tl('添加步骤失败'))
   }
 }
 
@@ -201,7 +220,7 @@ const handleDeleteStep = async (step: Step, event: Event) => {
 
   try {
     await deleteTestCaseStep(props.testCaseId, step.id)
-    Message.success('步骤删除成功')
+    Message.success(tl('步骤删除成功'))
     const updatedSteps = props.steps.filter(s => s.id !== step.id)
     updatedSteps.forEach((s, index) => {
       s.order = index + 1
@@ -211,7 +230,7 @@ const handleDeleteStep = async (step: Step, event: Event) => {
       emit('select', null)
     }
   } catch (error) {
-    Message.error('步骤删除失败')
+    Message.error(tl('步骤删除失败'))
   }
 }
 
@@ -251,10 +270,10 @@ const handleDragEnd = async (evt: any) => {
       step.order = index + 1
     })
 
-    Message.success('步骤顺序已更新')
+    Message.success(tl('步骤顺序已更新'))
   } catch (error) {
     console.error('Failed to update step order:', error)
-    Message.error('更新步骤顺序失败')
+    Message.error(tl('更新步骤顺序失败'))
 
     const currentIndex = props.steps.findIndex(s => s.id === draggedStep.value?.id)
     if (currentIndex !== -1 && originalOrder.value) {
@@ -285,7 +304,7 @@ const getMethodColor = (method?: string) => {
 }
 
 const formatUrl = (url?: string): string => {
-  if (!url) return '未设置URL'
+  if (!url) return tl('未设置URL')
 
   if (url.includes('?')) {
     const [path, query] = url.split('?')
@@ -322,7 +341,7 @@ const formatUrl = (url?: string): string => {
   <div class="testcase-step-list h-full">
     <div class="flex justify-between items-center mb-4">
       <div class="flex items-center">
-        <a-tag>{{ steps.length }}个步骤</a-tag>
+        <a-tag>{{ formatCountLabel(steps.length, '个步骤', 'step') }}</a-tag>
       </div>
     </div>
     <div class="space-y-3 max-h-[calc(100vh-20rem)] overflow-y-auto hide-scrollbar">
@@ -358,7 +377,7 @@ const formatUrl = (url?: string): string => {
                 </span>
                 <div class="flex-1 min-w-0 overflow-hidden">
                   <div class="flex items-center justify-between mb-2">
-                    <span class="step-title font-medium">{{ step.name }}</span>
+                    <span class="step-title font-medium">{{ translateStepName(step.name) }}</span>
                   </div>
                   <div class="flex items-center gap-2 text-sm">
                     <span :class="[getMethodColor(step.interface_info?.method), 'flex-shrink-0']">
@@ -366,20 +385,20 @@ const formatUrl = (url?: string): string => {
                     </span>
                     <span
                       class="step-url truncate max-w-[calc(100%-4rem)]"
-                      :title="step.interface_info?.url || '未设置URL'"
+                      :title="step.interface_info?.url || tl('未设置URL')"
                     >
                       {{ formatUrl(step.interface_info?.url) }}
                     </span>
                   </div>
                   <div class="flex flex-wrap gap-2 mt-2">
                     <a-tag size="small" color="arcoblue" :class="{'!opacity-30': !Object.keys(step.interface_data?.variables || {}).length}">
-                      {{ Object.keys(step.interface_data?.variables || {}).length }}个变量
+                      {{ formatCountLabel(Object.keys(step.interface_data?.variables || {}).length, '个变量', 'variable') }}
                     </a-tag>
                     <a-tag size="small" color="orange" :class="{'!opacity-30': !Object.keys(step.interface_data?.extract || {}).length}">
-                      {{ Object.keys(step.interface_data?.extract || {}).length }}个提取
+                      {{ formatCountLabel(Object.keys(step.interface_data?.extract || {}).length, '个提取', 'extract') }}
                     </a-tag>
                     <a-tag size="small" color="green" :class="{'!opacity-30': !step.interface_data?.validators?.length}">
-                      {{ step.interface_data?.validators?.length || 0 }}个断言
+                      {{ formatCountLabel(step.interface_data?.validators?.length || 0, '个断言', 'assertion') }}
                     </a-tag>
                   </div>
                 </div>
@@ -406,7 +425,7 @@ const formatUrl = (url?: string): string => {
         >
           <div class="add-step-text p-4 flex items-center justify-center gap-2">
             <icon-plus />
-            <span>添加步骤</span>
+            <span>{{ tl('添加步骤') }}</span>
           </div>
         </div>
         <template #content>
@@ -418,7 +437,7 @@ const formatUrl = (url?: string): string => {
             >
               <div class="flex items-center h-full w-full">
                 <span class="step-type-icon w-5 h-5 flex items-center justify-center rounded-lg text-sm ml-2">{{ type.icon }}</span>
-                <span class="text-sm flex-1 text-center">{{ type.label }}</span>
+                <span class="text-sm flex-1 text-center">{{ tl(type.label) }}</span>
                 <span class="w-5"></span>
               </div>
             </a-menu-item>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
 import type { NewEnvironmentVariableData, VariableType } from '../../services/environmentService'
 import { VARIABLE_TYPES } from '../../services/environmentService'
+import { useAppI18n } from '@/composables/useAppI18n'
 import {
   IconPlus,
   IconCode,
@@ -21,6 +22,28 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { isEnglish } = useAppI18n()
+
+const text = computed(() => isEnglish.value
+  ? {
+      addNewVariable: 'Add New Variable',
+      variableName: 'Variable Name',
+      variableValue: 'Variable Value',
+      selectVariableType: 'Select Variable Type',
+      variableDescriptionOptional: 'Variable Description (optional)',
+      sensitiveVariable: 'Sensitive Variable',
+      saveVariable: 'Save Variable',
+    }
+  : {
+      addNewVariable: '添加新变量',
+      variableName: '变量名',
+      variableValue: '变量值',
+      selectVariableType: '选择变量类型',
+      variableDescriptionOptional: '变量描述（选填）',
+      sensitiveVariable: '敏感变量',
+      saveVariable: '保存变量',
+    }
+)
 
 const updateField = (field: keyof NewEnvironmentVariableData, value: string | number | boolean) => {
   emit('update:modelValue', {
@@ -43,14 +66,14 @@ const handleSubmit = () => {
       <div class="w-6 h-6 rounded bg-purple-500/10 flex items-center justify-center">
         <icon-plus class="text-purple-400 text-sm" />
       </div>
-      <span class="text-sm font-medium variable-form-title">添加新变量</span>
+      <span class="text-sm font-medium variable-form-title">{{ text.addNewVariable }}</span>
     </div>
     
     <div class="space-y-3">
       <a-input
         :model-value="modelValue.name"
         @update:model-value="val => updateField('name', val)"
-        placeholder="变量名"
+        :placeholder="text.variableName"
         allow-clear
         class="variable-field-control"
       >
@@ -61,7 +84,7 @@ const handleSubmit = () => {
       <a-input
         :model-value="modelValue.value"
         @update:model-value="val => updateField('value', val)"
-        placeholder="变量值"
+        :placeholder="text.variableValue"
         allow-clear
         class="variable-field-control"
       >
@@ -74,7 +97,7 @@ const handleSubmit = () => {
       <a-select
         :model-value="modelValue.type"
         @update:model-value="val => updateField('type', val)"
-        placeholder="选择变量类型"
+        :placeholder="text.selectVariableType"
         class="variable-field-control"
       >
         <a-option
@@ -89,7 +112,7 @@ const handleSubmit = () => {
       <a-input
         :model-value="modelValue.description"
         @update:model-value="val => updateField('description', val)"
-        placeholder="变量描述（选填）"
+        :placeholder="text.variableDescriptionOptional"
         allow-clear
         class="variable-field-control"
       >
@@ -107,7 +130,7 @@ const handleSubmit = () => {
         />
         <div class="flex items-center gap-2">
           <icon-lock class="text-purple-400" />
-          <span class="variable-form-title">敏感变量</span>
+          <span class="variable-form-title">{{ text.sensitiveVariable }}</span>
         </div>
       </div>
     </div>
@@ -119,7 +142,7 @@ const handleSubmit = () => {
         @click="handleSubmit"
       >
         <template #icon><icon-plus /></template>
-        保存变量
+        {{ text.saveVariable }}
       </a-button>
     </div>
   </div>
