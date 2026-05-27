@@ -269,6 +269,7 @@ class TestCaseModuleSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "testcase_count",  # 添加到字段列表
+            "order",
         ]
         read_only_fields = [
             "id",
