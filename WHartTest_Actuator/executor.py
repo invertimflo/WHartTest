@@ -4,15 +4,18 @@ UI自动化执行器 - Python Playwright执行引擎
 """
 
 import asyncio
+import importlib
+import json
 import logging
+import re
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright, expect
+from playwright.async_api import async_playwright, Browser, BrowserContext, FrameLocator, Page, Playwright, expect
 
 from models import StepResultModel, CaseResultModel
 
@@ -26,6 +29,7 @@ class StepConfig:
     operation_type: str      # click, fill, goto, wait, assert等
     locator_type: str        # xpath, css, id等
     locator_value: str
+    step_type: int = 0       # 0元素操作, 1断言操作, 2 SQL操作
     input_value: str = ''
     description: str = ''
     wait_time: float = 0
@@ -38,6 +42,7 @@ class StepConfig:
     locator_type_3: Optional[str] = None
     locator_value_3: Optional[str] = None
     locator_index_3: Optional[int] = None
+    sql_execute: Any = None
     
     # 步骤详情(公共步骤)
     details: list['StepConfig'] = field(default_factory=list)
@@ -50,6 +55,7 @@ class PageStepConfig:
     page_url: str
     page_name: str
     steps: list[StepConfig] = field(default_factory=list)
+    env_config: Optional[dict] = None
 
 
 @dataclass
@@ -224,28 +230,295 @@ class PlaywrightExecutor:
         page.on("dialog", handle_dialog)
         page.on("pageerror", handle_pageerror)
 
-    def _get_locator(self, page: Page, locator_type: str, locator_value: str):
+    def _get_locator(self, container: Union[Page, FrameLocator], locator_type: str, locator_value: str):
         """根据定位类型获取元素定位器"""
         locator_map = {
-            'xpath': lambda: page.locator(f"xpath={locator_value}"),
-            'css': lambda: page.locator(locator_value),
-            'id': lambda: page.locator(f"#{locator_value}"),
-            'name': lambda: page.locator(f"[name='{locator_value}']"),
-            'text': lambda: page.get_by_text(locator_value),
-            'role': lambda: page.get_by_role(locator_value),
-            'placeholder': lambda: page.get_by_placeholder(locator_value),
-            'label': lambda: page.get_by_label(locator_value),
-            'testid': lambda: page.get_by_test_id(locator_value),
+            'xpath': lambda: container.locator(f"xpath={locator_value}"),
+            'css': lambda: container.locator(locator_value),
+            'id': lambda: container.locator(f"#{locator_value}"),
+            'name': lambda: container.locator(f"[name='{locator_value}']"),
+            'text': lambda: container.get_by_text(locator_value),
+            'role': lambda: container.get_by_role(locator_value),
+            'placeholder': lambda: container.get_by_placeholder(locator_value),
+            'label': lambda: container.get_by_label(locator_value),
+            'testid': lambda: container.get_by_test_id(locator_value),
         }
-        return locator_map.get(locator_type, lambda: page.locator(locator_value))()
+        return locator_map.get(locator_type, lambda: container.locator(locator_value))()
+
+    @staticmethod
+    def _first_sql_keyword(sql: str) -> str:
+        sql = sql.strip()
+        while sql.startswith('--'):
+            _, _, sql = sql.partition('\n')
+            sql = sql.strip()
+        return sql.split(None, 1)[0].lower() if sql else ''
+
+    def _normalize_sql_execute(self, step: StepConfig) -> dict[str, Any]:
+        """解析 SQL 步骤配置，兼容前端 JSON 文本中的常见字段名。"""
+        raw_config = step.sql_execute or {}
+        if isinstance(raw_config, str):
+            raw_config = {'sql': raw_config}
+        if not isinstance(raw_config, dict):
+            raise ValueError("SQL执行配置必须是对象或SQL字符串")
+
+        sql = (
+            raw_config.get('sql')
+            or raw_config.get('statement')
+            or raw_config.get('query')
+        )
+        if not sql or not str(sql).strip():
+            raise ValueError("SQL执行配置缺少 sql 字段")
+        sql = str(sql)
+
+        configured_method = (
+            raw_config.get('method')
+            or raw_config.get('sql_method')
+            or raw_config.get('action')
+            or raw_config.get('execute_type')
+        )
+        first_keyword = self._first_sql_keyword(sql)
+        supported_methods = {
+            'fetchone', 'fetchmany', 'fetchall', 'select', 'query',
+            'insert', 'update', 'delete', 'execute',
+        }
+        method = str(configured_method).lower() if configured_method else ''
+        if method not in supported_methods:
+            if first_keyword in {'select', 'with', 'values'}:
+                method = 'fetchall'
+            elif first_keyword in {'insert', 'update', 'delete'}:
+                method = first_keyword
+            else:
+                method = 'execute'
+        if method in {'select', 'query'}:
+            method = 'fetchall'
+
+        params = (
+            raw_config.get('params')
+            if 'params' in raw_config
+            else raw_config.get('sql_params', raw_config.get('parameters'))
+        )
+        if params is None:
+            params = {}
+        if not isinstance(params, (dict, list, tuple)):
+            raise ValueError("SQL参数必须是对象或数组")
+
+        size = raw_config.get('size', raw_config.get('sql_size', raw_config.get('limit', 10)))
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 10
+
+        return {
+            'sql': sql,
+            'method': method,
+            'params': params,
+            'size': max(size, 1),
+            'first_keyword': first_keyword,
+            'db_type': raw_config.get('db_type') or raw_config.get('database_type'),
+            'connection': raw_config.get('connection'),
+            'db_config': raw_config.get('db_config') or raw_config.get('connection_config'),
+        }
+
+    def _resolve_sql_connection_config(
+        self,
+        sql_config: dict[str, Any],
+        env_config: Optional[dict],
+    ) -> tuple[str, dict[str, Any]]:
+        if not env_config:
+            raise ValueError("执行SQL步骤需要选择包含数据库配置的执行环境")
+
+        db_type = str(sql_config.get('db_type') or env_config.get('db_type') or 'mysql').lower()
+        if db_type not in {'mysql', 'db2'}:
+            raise ValueError(f"不支持的UI自动化数据库类型: {db_type}")
+
+        direct_config = sql_config.get('connection') or sql_config.get('db_config')
+        if direct_config is not None and not isinstance(direct_config, dict):
+            raise ValueError("SQL连接配置必须是对象")
+
+        db_config = direct_config or env_config.get(f'{db_type}_config') or {}
+        if not isinstance(db_config, dict) or not db_config:
+            raise ValueError(f"执行环境缺少 {db_type.upper()} 数据库配置")
+
+        required_fields = ['host', 'port', 'database']
+        missing = [field for field in required_fields if not db_config.get(field)]
+        user = db_config.get('user') or db_config.get('username')
+        if not user:
+            missing.append('user')
+        if not db_config.get('password'):
+            missing.append('password')
+        if missing:
+            raise ValueError(f"{db_type.upper()} 数据库配置缺少字段: {', '.join(missing)}")
+
+        resolved = dict(db_config)
+        resolved['user'] = user
+        return db_type, resolved
+
+    def _validate_sql_permission(self, sql_config: dict[str, Any], env_config: dict) -> None:
+        keyword = sql_config['first_keyword']
+        method = sql_config['method']
+
+        if keyword == 'insert' or method == 'insert':
+            if not env_config.get('db_c_status', False):
+                raise ValueError("当前环境未启用数据库新增操作")
+            return
+
+        if not env_config.get('db_rud_status', False):
+            raise ValueError("当前环境未启用数据库查改删操作")
+
+    @staticmethod
+    def _execute_cursor(cursor: Any, sql: str, params: Any) -> None:
+        if params in ({}, [], ()):
+            cursor.execute(sql)
+        else:
+            cursor.execute(sql, params)
+
+    @staticmethod
+    def _rows_to_dicts(rows: Any, description: Any) -> list[Any]:
+        if rows is None:
+            return []
+        if isinstance(rows, dict):
+            return [rows]
+        if not isinstance(rows, list):
+            rows = [rows]
+
+        columns = [desc[0] for desc in description] if description else []
+        result = []
+        for row in rows:
+            if isinstance(row, dict):
+                result.append(row)
+            elif columns and isinstance(row, (list, tuple)):
+                result.append(dict(zip(columns, row)))
+            else:
+                result.append(row)
+        return result
+
+    @staticmethod
+    def _preview_rows(rows: list[Any]) -> str:
+        if not rows:
+            return ''
+        preview = json.dumps(rows[:3], ensure_ascii=False, default=str)
+        if len(preview) > 500:
+            preview = preview[:500] + '...'
+        return preview
+
+    def _summarize_sql_result(self, method: str, rows: list[Any], affected_rows: int) -> str:
+        if method in {'fetchone', 'fetchmany', 'fetchall'}:
+            message = f"SQL操作执行成功: 返回 {len(rows)} 行"
+            preview = self._preview_rows(rows)
+            if preview:
+                message += f"，预览: {preview}"
+            return message
+
+        if affected_rows is None or affected_rows < 0:
+            return "SQL操作执行成功"
+        return f"SQL操作执行成功: 影响 {affected_rows} 行"
+
+    def _connect_mysql(self, config: dict[str, Any]):
+        try:
+            pymysql = importlib.import_module('pymysql')
+        except ImportError as exc:
+            raise RuntimeError("执行MySQL SQL步骤需要安装依赖 pymysql") from exc
+
+        return pymysql.connect(
+            host=config['host'],
+            port=int(config['port']),
+            user=config['user'],
+            password=config['password'],
+            database=config['database'],
+            charset=config.get('charset') or 'utf8mb4',
+            connect_timeout=int(config.get('connect_timeout') or 10),
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+
+    def _connect_db2(self, config: dict[str, Any]):
+        try:
+            ibm_db_dbi = importlib.import_module('ibm_db_dbi')
+        except ImportError as exc:
+            raise RuntimeError("执行DB2 SQL步骤需要安装依赖 ibm_db") from exc
+
+        dsn = (
+            f"DATABASE={config['database']};"
+            f"HOSTNAME={config['host']};"
+            f"PORT={int(config['port'])};"
+            "PROTOCOL=TCPIP;"
+            f"UID={config['user']};"
+            f"PWD={config['password']};"
+        )
+        return ibm_db_dbi.connect(dsn, '', '')
+
+    def _execute_sql_step(
+        self,
+        step: StepConfig,
+        env_config: Optional[dict],
+    ) -> tuple[bool, str]:
+        sql_config = self._normalize_sql_execute(step)
+        if env_config is None:
+            raise ValueError("执行SQL步骤需要执行环境")
+        self._validate_sql_permission(sql_config, env_config)
+        db_type, db_config = self._resolve_sql_connection_config(sql_config, env_config)
+
+        conn = None
+        cursor = None
+        try:
+            conn = self._connect_db2(db_config) if db_type == 'db2' else self._connect_mysql(db_config)
+            cursor = conn.cursor()
+
+            if db_type == 'db2' and db_config.get('schema'):
+                schema = str(db_config['schema'])
+                if not re.match(r'^[A-Za-z_][A-Za-z0-9_@$#]*$', schema):
+                    raise ValueError("DB2 schema 只能包含字母、数字、下划线、@、$、#，且不能以数字开头")
+                cursor.execute(f"SET CURRENT SCHEMA {schema}")
+
+            self._execute_cursor(cursor, sql_config['sql'], sql_config['params'])
+
+            method = sql_config['method']
+            rows: list[Any] = []
+            description = getattr(cursor, 'description', None)
+            if method == 'fetchone':
+                rows = self._rows_to_dicts(cursor.fetchone(), description)
+            elif method == 'fetchmany':
+                rows = self._rows_to_dicts(cursor.fetchmany(sql_config['size']), description)
+            elif method == 'fetchall':
+                rows = self._rows_to_dicts(cursor.fetchall(), description)
+            else:
+                conn.commit()
+
+            return True, self._summarize_sql_result(method, rows, getattr(cursor, 'rowcount', -1))
+        except Exception:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     
-    async def _execute_step(self, page: Page, step: StepConfig) -> tuple[bool, str, str | None]:
+    async def _execute_step(
+        self,
+        page: Page,
+        step: StepConfig,
+        env_config: Optional[dict] = None,
+    ) -> tuple[bool, str, str | None]:
         """执行单个步骤
         
         Returns:
             tuple: (成功与否, 消息, 截图路径(可选))
         """
-        operation = step.operation_type.lower()
+        if step.step_type == 2:
+            success, message = await asyncio.to_thread(self._execute_sql_step, step, env_config)
+            return success, message, None
+
+        operation = (step.operation_type or '').lower()
         screenshot_path: str | None = None
         
         # 等待时间（仅当用户明确设置 > 0 时才等待，用于特殊场景）
@@ -487,7 +760,11 @@ class PlaywrightExecutor:
                         
                         step_start = time.time()
                         try:
-                            success, message, step_screenshot = await self._execute_step(page, step)
+                            success, message, step_screenshot = await self._execute_step(
+                                page,
+                                step,
+                                page_step.env_config or config.env_config,
+                            )
                             step_duration = time.time() - step_start
 
                             step_result = StepResultModel(
@@ -612,7 +889,11 @@ class PlaywrightExecutor:
                 for step in config.steps:
                     step_start = time.time()
                     try:
-                        success, message, step_screenshot = await self._execute_step(page, step)
+                        success, message, step_screenshot = await self._execute_step(
+                            page,
+                            step,
+                            config.env_config,
+                        )
                         step_duration = time.time() - step_start
 
                         step_result = StepResultModel(
@@ -744,7 +1025,11 @@ class PlaywrightExecutor:
 
                     step_start = time.time()
                     try:
-                        success, message, step_screenshot = await self._execute_step(page, step)
+                        success, message, step_screenshot = await self._execute_step(
+                            page,
+                            step,
+                            page_step.env_config or config.env_config,
+                        )
                         step_duration = time.time() - step_start
 
                         step_result = StepResultModel(

@@ -328,7 +328,7 @@ class TaskConsumer:
             logger.info(f"使用环境配置: {env_config.get('name')}, base_url: {base_url}")
         
         # 构建配置，传入 base_url 和数据处理器
-        config = self._build_page_step_config(page_step_data, base_url, data_processor)
+        config = self._build_page_step_config(page_step_data, base_url, data_processor, env_config)
         
         # 执行（使用同一浏览器会话）
         logger.info(f"开始执行页面步骤: {config.page_name}")
@@ -618,20 +618,29 @@ class TaskConsumer:
         
         return data_processor
 
-    def _build_page_step_config(self, data: dict, base_url: str = '', data_processor: Optional[DataProcessor] = None) -> PageStepConfig:
+    def _build_page_step_config(
+        self,
+        data: dict,
+        base_url: str = '',
+        data_processor: Optional[DataProcessor] = None,
+        env_config: Optional[dict] = None,
+    ) -> PageStepConfig:
         """构建页面步骤配置
         
         Args:
             data: 页面步骤数据
             base_url: 环境基础URL
             data_processor: 变量处理器，用于替换 ${{变量名}} 语法
+            env_config: 执行环境配置，用于 SQL 步骤获取数据库连接
         """
         steps = []
         
         for detail in data.get('step_details', []):
+            step_type = detail.get('step_type', 0)
             # 从 ope_value 中提取输入值
             # 支持多种格式：{"text": "admin"}, {"value": "xxx"}, {"timeout": 3000}, 或纯字符串/数字
             ope_value = detail.get('ope_value', {})
+            sql_execute = detail.get('sql_execute') or {}
             if isinstance(ope_value, dict):
                 # 按优先级尝试提取常见字段
                 input_value = (
@@ -657,6 +666,10 @@ class TaskConsumer:
             
             # 变量替换：替换 input_value 和 locator_value 中的 ${{变量名}}
             if data_processor:
+                sql_execute = data_processor.replace(sql_execute)
+                if not isinstance(sql_execute, (dict, str)):
+                    sql_execute = {}
+
                 original_input = input_value
                 input_value = data_processor.replace(input_value)
                 if original_input != input_value:
@@ -701,11 +714,12 @@ class TaskConsumer:
             
             steps.append(StepConfig(
                 step_id=detail.get('id', 0),
-                operation_type=detail.get('ope_key', ''),  # 操作类型如 click, type
-                locator_type=detail.get('locator_type', 'xpath'),  # 定位方式
-                locator_value=locator_value,  # 定位表达式
+                operation_type=detail.get('ope_key') or '',  # 操作类型如 click, type
+                locator_type=detail.get('locator_type') or 'xpath',  # 定位方式
+                locator_value=locator_value or '',  # 定位表达式
+                step_type=step_type,
                 input_value=input_value,  # 输入值
-                description=detail.get('element_name', ''),  # 元素名称作为描述
+                description=detail.get('description') or detail.get('element_name') or ('SQL操作' if step_type == 2 else ''),
                 wait_time=detail.get('wait_time', 0),
                 is_iframe=detail.get('is_iframe', False),
                 iframe_locator=detail.get('iframe_locator') or '',
@@ -716,6 +730,7 @@ class TaskConsumer:
                 locator_type_3=detail.get('locator_type_3'),
                 locator_value_3=locator_value_3 or None,
                 locator_index_3=_parse_index(detail.get('locator_index_3')),
+                sql_execute=sql_execute,
             ))
         
         # 页面URL处理：支持相对路径与 base_url 拼接
@@ -741,7 +756,8 @@ class TaskConsumer:
             page_step_id=data.get('id', 0),
             page_url=page_url,
             page_name=data.get('name', ''),  # 页面步骤名称
-            steps=steps
+            steps=steps,
+            env_config=env_config,
         )
     
     def _build_test_case_config(self, data: dict, env_config: Optional[dict] = None, data_processor: Optional[DataProcessor] = None) -> TestCaseConfig:
@@ -763,7 +779,7 @@ class TaskConsumer:
         for case_step in data.get('case_step_details', []):
             page_step_data = case_step.get('page_step', {})
             if page_step_data:
-                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor))
+                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor, env_config))
         
         return TestCaseConfig(
             case_id=data.get('id', 0),
