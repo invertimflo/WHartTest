@@ -90,7 +90,7 @@
       <button
         type="button"
         class="context-menu-item"
-        :disabled="!isModuleOrRootSelected"
+        :disabled="selectedNodeType !== 'module'"
         @click="handleContextMenuAction('create-case')"
       >
         新建用例
@@ -987,9 +987,15 @@ const handleDirectChildCreate = (node: any) => {
   const nodeData = getNodePayload(node);
   if (!nodeData) return;
 
-  if (nodeData.type === 'module' || nodeData.type === 'root') {
-    // 选中模块或根节点时，快速新增用例，免弹窗
-    emit('create-case', nodeData.type === 'module' ? nodeData.rawId : null, buildDefaultNodeName('case'));
+  if (nodeData.type === 'root') {
+    // 选中根节点时，快速新增子模块，因为测试用例不能直接放在根节点下（后端限制必选模块）
+    emit('create-module', null, buildDefaultNodeName('module'));
+    return;
+  }
+
+  if (nodeData.type === 'module') {
+    // 选中模块时，快速新增用例，免弹窗
+    emit('create-case', nodeData.rawId, buildDefaultNodeName('case'));
     return;
   }
 
@@ -1144,7 +1150,11 @@ const handleDirectCreateShortcut = (key: string, nodeList: any[]) => {
     const clipRawId = clipData.rawId;
 
     if (clipType === 'case') {
-      const targetModuleId = parentData?.type === 'module' ? parentData.rawId : null;
+      if (parentData?.type !== 'module') {
+        Message.warning('用例只能粘贴到模块节点下');
+        return true;
+      }
+      const targetModuleId = parentData.rawId;
       console.log(`[Mindmap Shortcut Paste] case: sourceId=${clipRawId}, targetModuleId=${targetModuleId}`);
       lastCopiedCaseExpandMap.value = captureSourceExpandStates(clipRawId);
       isPasting.value = true;
@@ -1263,7 +1273,7 @@ const handleCreateSubmodule = () => {
 };
 
 const handleCreateTestCase = () => {
-  if (!isModuleOrRootSelected.value) return;
+  if (selectedNodeType.value !== 'module') return;
   closeContextMenu();
   emit('create-case', getSelectedModuleParentId(), buildDefaultNodeName('case'));
 };
@@ -1470,7 +1480,12 @@ const handleContextMenuAction = (action: 'create-submodule' | 'create-case' | 'c
     const clipRawId = clipData.rawId;
 
     if (clipType === 'case') {
-      const targetModuleId = parentData?.type === 'module' ? parentData.rawId : null;
+      if (parentData?.type !== 'module') {
+        Message.warning('用例只能粘贴到模块节点下');
+        closeContextMenu();
+        return;
+      }
+      const targetModuleId = parentData.rawId;
       console.log(`[Mindmap Context Menu Paste] case: sourceId=${clipRawId}, targetModuleId=${targetModuleId}`);
       lastCopiedCaseExpandMap.value = captureSourceExpandStates(clipRawId);
       isPasting.value = true;
