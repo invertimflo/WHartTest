@@ -717,16 +717,19 @@ class TestCaseModuleViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         """
-        删除模块前检查是否有关联的测试用例
+        级联删除模块，递归删除其下所有的测试用例和子模块
         """
-        if instance.testcases.exists():
-            from rest_framework.exceptions import ValidationError
+        from django.db import transaction
+        from testcases.models import TestCase
 
-            testcase_count = instance.testcases.count()
-            raise ValidationError(
-                f"无法删除模块 '{instance.name}'，因为该模块下还有 {testcase_count} 个测试用例。请先删除或移动这些用例。"
-            )
-        instance.delete()
+        # 获取该模块及其所有后代子模块的 ID 列表
+        descendant_ids = instance.get_all_descendant_ids()
+
+        with transaction.atomic():
+            # 先删除这些模块下的所有测试用例，解除 PROTECT 约束关系
+            TestCase.objects.filter(module_id__in=descendant_ids).delete()
+            # 接着删除当前模块实例，其子模块会自动级联删除（models.CASCADE）
+            instance.delete()
 
     def get_serializer_context(self):
         """
