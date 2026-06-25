@@ -594,7 +594,18 @@ class TestCaseRunnerSummaryTest(TestCase):
     """TestCaseRunner summary/result tests."""
 
     @staticmethod
-    def _build_request_step_result(status_code=500, success=True, validators=None):
+    def _build_request_step_result(
+        status_code=500,
+        success=True,
+        validators=None,
+        response_body=None,
+        response_error=None,
+        response_error_type=None,
+        is_transport_error=False,
+    ):
+        if response_body is None:
+            response_body = {'message': 'expected'}
+
         return SimpleNamespace(
             name='Step 1',
             step_type='request',
@@ -615,7 +626,10 @@ class TestCaseRunnerSummaryTest(TestCase):
                         response=SimpleNamespace(
                             status_code=status_code,
                             headers={},
-                            body={'message': 'expected'},
+                            body=response_body,
+                            error=response_error,
+                            error_type=response_error_type,
+                            is_transport_error=is_transport_error,
                         ),
                     )
                 ],
@@ -635,6 +649,70 @@ class TestCaseRunnerSummaryTest(TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0]['success'])
         self.assertEqual(results[0]['data']['response']['status_code'], 500)
+
+    @patch('api_testcases.runner.HttpRunner.get_summary')
+    def test_get_step_results_recovers_request_body_on_transport_failure(
+        self,
+        mock_get_summary,
+    ):
+        mock_get_summary.return_value = SimpleNamespace(
+            step_results=[
+                self._build_request_step_result(
+                    status_code=0,
+                    success=True,
+                    response_body={
+                        'transport_error': {
+                            'type': 'ConnectionError',
+                            'message': 'connection refused',
+                        },
+                    },
+                    response_error='connection refused',
+                    response_error_type='ConnectionError',
+                    is_transport_error=True,
+                )
+            ],
+        )
+
+        runner = TestCaseRunner.__new__(TestCaseRunner)
+        runner.trace_id = 'tc-test'
+        runner.testcase = SimpleNamespace(id=123)
+        runner.step_body_diagnostics = [{
+            'prepared': True,
+            'target': 'data',
+            'prepared_summary': {'type': 'dict', 'size': 1},
+        }]
+        runner.step_request_snapshots = [{
+            'method': 'POST',
+            'url': 'http://example.com/error',
+            'headers': {'Authorization': 'Bearer token'},
+            'body': {'username': 'tester'},
+        }]
+
+        results = runner.get_step_results()
+
+        self.assertFalse(results[0]['success'])
+        self.assertEqual(results[0]['data']['response']['status_code'], 0)
+        self.assertEqual(
+            results[0]['data']['request']['headers'],
+            {'Authorization': 'Bearer token'},
+        )
+        self.assertEqual(
+            results[0]['data']['request']['body'],
+            {'username': 'tester'},
+        )
+        self.assertTrue(results[0]['data']['response']['is_transport_error'])
+        self.assertEqual(
+            results[0]['data']['response']['error_type'],
+            'ConnectionError',
+        )
+        self.assertEqual(
+            results[0]['data']['response']['error'],
+            'connection refused',
+        )
+        self.assertEqual(
+            results[0]['data']['response']['body']['transport_error']['message'],
+            'connection refused',
+        )
 
     @patch('api_testcases.runner.HttpRunner.get_summary')
     def test_get_summary_uses_step_assertions_not_status_code(self, mock_get_summary):

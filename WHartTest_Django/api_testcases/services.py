@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 from django.utils import timezone
 from django.db import transaction
+from api_interfaces.logging_utils import summarize_for_log
 from .models import ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail
 from .runner import TestCaseRunner
 
@@ -140,7 +141,16 @@ class TestExecutionService:
         runner.run_testcase(environment)
 
         summary = runner.get_summary()
-        step_results = runner.get_step_results()
+        step_results = summary.get('step_results', [])
+        logger.info(
+            "Testcase execution summary generated: trace_id=%s testcase_id=%s "
+            "testcase_name=%s success=%s step_count=%s",
+            runner.trace_id,
+            testcase.id,
+            testcase.name,
+            summary['success'],
+            len(step_results),
+        )
 
         with transaction.atomic():
             report = ApiTestReport.objects.create(
@@ -154,6 +164,16 @@ class TestExecutionService:
                 testcase=testcase,
                 executed_by=user,
                 environment_id=environment.get('id') if environment else None
+            )
+            logger.info(
+                "Testcase report saved: trace_id=%s report_id=%s testcase_id=%s "
+                "status=%s success_count=%s fail_count=%s",
+                runner.trace_id,
+                report.id,
+                testcase.id,
+                report.status,
+                report.success_count,
+                report.fail_count,
             )
 
             steps_by_order = {step.order: step for step in testcase.steps.all()}
@@ -181,8 +201,31 @@ class TestExecutionService:
                         extracted_variables=step_result['data']['extracted_variables'],
                         attachment=step_result['attachment']
                     )
+                    request_body = step_result['data']['request'].get('body')
+                    status_code = step_result['data']['response'].get('status_code')
+                    logger.info(
+                        "Testcase report detail saved: trace_id=%s report_id=%s "
+                        "testcase_id=%s step_id=%s step_name=%s status_code=%s "
+                        "success=%s recorded_request_body_summary=%s "
+                        "transport_failure_record_body_may_be_empty=%s",
+                        runner.trace_id,
+                        report.id,
+                        testcase.id,
+                        step.id,
+                        step.name,
+                        status_code,
+                        step_success,
+                        summarize_for_log(request_body),
+                        status_code == 0 and request_body is None,
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to create test report detail: {str(e)}")
+                    logger.error(
+                        "Failed to create test report detail: trace_id=%s "
+                        "testcase_id=%s error=%s",
+                        runner.trace_id,
+                        testcase.id,
+                        str(e),
+                    )
                     continue
 
         return report

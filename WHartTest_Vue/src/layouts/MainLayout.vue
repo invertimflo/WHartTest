@@ -15,6 +15,7 @@
             :disabled="projectStore.loading"
             :placeholder="t('layout.projectPlaceholder')"
             style="width: 200px; margin-left: 10px;"
+            :trigger-props="headerSelectTriggerProps"
             @change="handleProjectChange"
             @popup-visible-change="handlePopupVisibleChange"
           >
@@ -31,6 +32,7 @@
             :loading="environmentStore.loading"
             :placeholder="tl('选择环境')"
             style="width: 180px; margin-left: 10px;"
+            :trigger-props="headerSelectTriggerProps"
             @change="handleEnvironmentChange"
             @popup-visible-change="handleEnvironmentPopupVisibleChange"
             allow-clear
@@ -351,6 +353,9 @@ const projectStore = useProjectStore();
 const themeStore = useThemeStore();
 const environmentStore = useEnvironmentStore();
 const { locale, t, tl } = useAppI18n();
+const headerSelectTriggerProps = {
+  contentClass: 'layout-header-select-dropdown',
+};
 
 // 版本信息
 const currentVersion = ref(formatVersion(getCurrentVersion()));
@@ -766,6 +771,70 @@ onMounted(async () => {
 .project-selector {
   display: flex;
   align-items: center;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown.arco-select-dropdown) {
+  background: #ffffff !important;
+  border: 1px solid #e5e6eb !important;
+  border-radius: 6px !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12) !important;
+  color: #1d2129 !important;
+  padding: 4px !important;
+  margin: 4px 0 !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-dropdown-list) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 2px !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option) {
+  display: flex !important;
+  align-items: center !important;
+  min-height: 32px !important;
+  margin: 2px 0 !important;
+  padding: 0 12px !important;
+  border: none !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  color: #1d2129 !important;
+  line-height: 32px !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option:hover) {
+  background: #f2f3f5 !important;
+  color: #1d2129 !important;
+}
+
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-active),
+:global(.layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-selected) {
+  background: rgba(var(--theme-accent-rgb), 0.12) !important;
+  color: var(--theme-accent) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown.arco-select-dropdown) {
+  background: #1d2639 !important;
+  border-color: rgba(148, 163, 184, 0.18) !important;
+  box-shadow: 0 22px 42px rgba(2, 6, 23, 0.42) !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option) {
+  background: transparent !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option:hover) {
+  background: #253347 !important;
+  color: var(--theme-text) !important;
+}
+
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-active),
+:global(:root[data-theme='black'] body[arco-theme='dark'] .layout-header-select-dropdown.layout-header-select-dropdown .arco-select-dropdown .arco-select-option-selected) {
+  background: #2a3a52 !important;
+  color: #93c5fd !important;
 }
 
 .user-info {

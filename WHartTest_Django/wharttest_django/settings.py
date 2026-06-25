@@ -527,6 +527,17 @@ LOGGING = {
             "formatter": "verbose",
             "encoding": "utf-8",
         },
+        # API接口/用例执行诊断日志
+        "api_file": {
+            "level": "INFO",
+            "class": "wharttest_django.safe_log_handler.SafeTimedRotatingFileHandler",
+            "filename": str(LOGS_DIR / "api.log"),
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": 30,
+            "formatter": "verbose",
+            "encoding": "utf-8",
+        },
     },
     "loggers": {
         # Django核心日志
@@ -588,6 +599,22 @@ LOGGING = {
         "testcases.serializers": {
             "handlers": ["console", "app_file", "error_file"],
             "level": "DEBUG",
+            "propagate": False,
+        },
+        # API接口/用例执行日志
+        "api_interfaces": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "api_testcases": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "testrunner": {
+            "handlers": ["console", "api_file", "error_file"],
+            "level": "INFO",
             "propagate": False,
         },
         # Orchestrator集成应用日志(Agent Loop压缩调试)
