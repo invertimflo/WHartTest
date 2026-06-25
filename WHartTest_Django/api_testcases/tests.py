@@ -892,6 +892,90 @@ class ApiTestCaseAPITest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data['steps']), 1)
 
+    def test_update_testcase_renames_existing_step_without_copying(self):
+        tc = ApiTestCase.objects.create(
+            name='Edit TC', project=self.project, created_by=self.user,
+            priority='P3',
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Old Step', order=1,
+            interface_data={'method': 'GET', 'url': '/old'},
+            testcase=tc, origin_interface=self.interface,
+        )
+
+        data = {
+            'name': 'Edit TC',
+            'priority': 'P2',
+            'update_mode': 'update',
+            'steps_info': [{
+                'id': step.pk,
+                'name': 'Renamed Step',
+                'order': 1,
+                'interface_id': self.interface.pk,
+                'interface_data': {
+                    'method': 'POST',
+                    'url': '/changed',
+                    'headers': [],
+                    'params': [],
+                    'body': {'type': 'raw', 'content': '{"ok": true}'},
+                    'validators': [],
+                    'extract': {},
+                    'setup_hooks': [],
+                    'teardown_hooks': [],
+                    'variables': {},
+                },
+            }],
+        }
+
+        response = self.client.put(f'{self.base_url}{tc.pk}/', data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(tc.steps.count(), 1)
+        step.refresh_from_db()
+        self.assertEqual(step.name, 'Renamed Step')
+        self.assertEqual(step.interface_data['method'], 'POST')
+        self.assertEqual(step.interface_data['body']['content'], '{"ok": true}')
+
+    def test_update_testcase_legacy_step_rename_by_order_does_not_copy(self):
+        tc = ApiTestCase.objects.create(
+            name='Legacy Edit TC', project=self.project, created_by=self.user,
+            priority='P3',
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Old Step', order=1,
+            interface_data={'method': 'GET', 'url': '/old'},
+            testcase=tc, origin_interface=self.interface,
+        )
+
+        data = {
+            'name': 'Legacy Edit TC',
+            'priority': 'P3',
+            'steps_info': [{
+                'name': 'Renamed Step',
+                'order': 1,
+                'interface_id': self.interface.pk,
+                'interface_data': {
+                    'method': 'GET',
+                    'url': '/old',
+                    'headers': [],
+                    'params': [],
+                    'body': {'type': 'raw', 'content': ''},
+                    'validators': [],
+                    'extract': {},
+                    'setup_hooks': [],
+                    'teardown_hooks': [],
+                    'variables': {},
+                },
+            }],
+        }
+
+        response = self.client.put(f'{self.base_url}{tc.pk}/', data, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(tc.steps.count(), 1)
+        step.refresh_from_db()
+        self.assertEqual(step.name, 'Renamed Step')
+
     def test_copy_testcase(self):
         tc = ApiTestCase.objects.create(
             name='Original', project=self.project, created_by=self.user,
