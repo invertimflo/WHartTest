@@ -44,6 +44,10 @@ const emit = defineEmits<{
 const interfaces = ref<ApiInterface[]>([])
 const interfaceLoading = ref(false)
 
+const toInterfaceList = (results: unknown): ApiInterface[] => {
+  return Array.isArray(results) ? results : []
+}
+
 // 获取接口列表
 const fetchInterfaces = async (moduleId: number) => {
   try {
@@ -53,7 +57,7 @@ const fetchInterfaces = async (moduleId: number) => {
       project_id: props.module.project,
       page_size: 1000
     })
-    interfaces.value = response.data?.results || []
+    interfaces.value = toInterfaceList(response.data?.results)
     console.log(`模块${props.module.name}获取到${interfaces.value.length}个接口`)
   } catch (error: any) {
     console.error('获取接口列表失败:', error)

@@ -49,13 +49,56 @@ export type ApiValidator = { comparator: string; check: string; expect: any; [k:
 export type DebugInterfaceRequest = Record<string, any>;
 export type QuickDebugInterfaceRequest = Record<string, any>;
 
+function _normalizeListPayload(payload: any, fallbackTotal?: number): PaginatedData<any> {
+  let current = payload;
+  let countHint = fallbackTotal;
+
+  for (let i = 0; i < 5; i += 1) {
+    if (Array.isArray(current)) {
+      return { results: current, count: countHint ?? current.length };
+    }
+
+    if (!current || typeof current !== 'object') {
+      break;
+    }
+
+    if (typeof current.count === 'number') {
+      countHint = current.count;
+    }
+
+    if (Array.isArray(current.results)) {
+      return { results: current.results, count: countHint ?? current.results.length };
+    }
+
+    if (Array.isArray(current.data)) {
+      return { results: current.data, count: countHint ?? current.data.length };
+    }
+
+    if (current.data && typeof current.data === 'object' && current.data !== current) {
+      current = current.data;
+      continue;
+    }
+
+    if (current.results && typeof current.results === 'object' && current.results !== current) {
+      current = current.results;
+      continue;
+    }
+
+    break;
+  }
+
+  return { results: [], count: countHint ?? 0 };
+}
+
 function _wrapList(res: any): any {
   if (!res.success) {
     const err: any = new Error(res.error || res.message || '操作失败');
     err.errors = res.errors;
     throw err;
   }
-  return { data: { results: res.data ?? [], count: res.total ?? 0 }, status: 'success', message: '' };
+
+  const { results, count } = _normalizeListPayload(res.data, res.total);
+  return { data: { results, count }, status: 'success', message: '' };
 }
 
 function _wrapOne(res: any): any {
