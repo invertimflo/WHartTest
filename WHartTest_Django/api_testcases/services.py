@@ -75,6 +75,52 @@ class TestExecutionService:
     """Test execution service class."""
 
     @staticmethod
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+        return None
+
+    @staticmethod
+    def _resolve_verify(config: Dict, environment: Dict) -> bool:
+        case_verify = TestExecutionService._coerce_bool(config.get('verify'))
+        if case_verify is not None:
+            return case_verify
+
+        env_verify = None
+        if 'verify_ssl' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify_ssl'))
+        elif 'verify' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify'))
+
+        if env_verify is not None:
+            return env_verify
+
+        return False
+
+    @staticmethod
+    def _resolve_verify_source(config: Dict, environment: Dict) -> str:
+        if TestExecutionService._coerce_bool(config.get('verify')) is not None:
+            return 'testcase'
+
+        if 'verify_ssl' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify_ssl'))
+        elif 'verify' in environment:
+            env_verify = TestExecutionService._coerce_bool(environment.get('verify'))
+        else:
+            env_verify = None
+
+        if env_verify is not None:
+            return 'environment'
+
+        return 'default'
+
+    @staticmethod
     def _prepare_config(config: Dict, environment: Optional[Dict] = None) -> Dict:
         if not isinstance(config, dict):
             config = {}
@@ -122,7 +168,7 @@ class TestExecutionService:
 
         return {
             "base_url": config.get('base_url') or environment.get('base_url', ''),
-            "verify": config.get('verify', environment.get('verify_ssl', True)),
+            "verify": TestExecutionService._resolve_verify(config, environment),
             "variables": {**env_variables, **case_variables},
             "export": config.get('export', []),
             "parameters": case_parameters
@@ -134,8 +180,15 @@ class TestExecutionService:
         environment: Optional[Dict] = None,
         user=None
     ) -> ApiTestReport:
+        source_config = testcase.config if isinstance(testcase.config, dict) else {}
+        source_environment = environment if isinstance(environment, dict) else {}
+        verify_source = TestExecutionService._resolve_verify_source(
+            source_config,
+            source_environment,
+        )
         config = TestExecutionService._prepare_config(testcase.config, environment)
         testcase.config = config
+        testcase._case_verify_explicit = verify_source == 'testcase'
 
         runner = TestCaseRunner(testcase)
         runner.run_testcase(environment)

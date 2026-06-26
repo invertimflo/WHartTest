@@ -111,6 +111,18 @@ const stepsForHeader = computed<TestCaseStepForHeader[]>(() => {
   }))
 })
 
+const resolveConfigVerify = (value: unknown) => {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+const buildSubmitConfig = () => {
+  const config = { ...(formData.config || {}) }
+  if (typeof config.verify !== 'boolean') {
+    delete config.verify
+  }
+  return config
+}
+
 const updateSteps = (newSteps: TestCaseStep[]) => {
   steps.value = newSteps.map(step => ({
     ...step,
@@ -160,7 +172,7 @@ const fetchTestCaseDetail = async () => {
         variables: testCase.config?.variables || '',
         parameters: testCase.config?.parameters || '',
         export: testCase.config?.export || '',
-        verify: testCase.config?.verify || ''
+        verify: resolveConfigVerify(testCase.config?.verify)
       }
 
       updateSteps(testCase.steps || [])
@@ -316,6 +328,7 @@ const handleSubmit = async (continueAction?: () => void) => {
     loading.value = true
     const submitData: CreateTestCaseData & { update_mode?: 'update' } = {
       ...formData,
+      config: buildSubmitConfig(),
       ...(props.mode === 'edit' ? { update_mode: 'update' } : {}),
       steps_info: steps.value.map((step, index) => ({
         ...(step.id ? { id: step.id } : {}),
@@ -495,7 +508,7 @@ const handleShowReport = async (tcId: number) => {
             variables: typeof formData.config?.variables === 'string' ? formData.config.variables : JSON.stringify(formData.config?.variables || {}),
             parameters: typeof formData.config?.parameters === 'string' ? formData.config.parameters : JSON.stringify(formData.config?.parameters || {}),
             export: Array.isArray(formData.config?.export) ? formData.config.export : [],
-            verify: typeof formData.config?.verify === 'boolean' ? formData.config.verify : true
+            verify: resolveConfigVerify(formData.config?.verify)
           }
         }"
         :loading="loading"
@@ -532,7 +545,7 @@ const handleShowReport = async (tcId: number) => {
               variables: typeof formData.config?.variables === 'string' ? {} : (formData.config?.variables || {}),
               parameters: typeof formData.config?.parameters === 'string' ? {} : (formData.config?.parameters || {}),
               export: Array.isArray(formData.config?.export) ? formData.config.export : [],
-              verify: typeof formData.config?.verify === 'boolean' ? formData.config.verify : true
+              verify: resolveConfigVerify(formData.config?.verify)
             }
           }"
           @add="handleAddStep"

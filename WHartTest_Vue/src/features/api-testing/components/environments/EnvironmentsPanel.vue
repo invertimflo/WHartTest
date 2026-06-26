@@ -81,7 +81,7 @@ const createForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: "null" as any,
-  verify_ssl: true
+  verify_ssl: false
 })
 
 // 删除环境相关
@@ -117,7 +117,7 @@ const switchToCreate = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
-    verify_ssl: true
+    verify_ssl: false
   }
   activeTab.value = 'create'
   selectedEnvironment.value = null
@@ -257,7 +257,7 @@ const editForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: null,
-  verify_ssl: true
+  verify_ssl: false
 })
 
 // 查看环境详情
@@ -308,7 +308,7 @@ const handleEdit = async (record: Environment) => {
       is_active: record.is_active,
       variables: record.variables || [],
       database_config: Number(record.database_config) || "null" as any,
-      verify_ssl: record.verify_ssl !== false
+      verify_ssl: record.verify_ssl === true
     }
 
     // 然后异步获取完整数据
@@ -337,7 +337,7 @@ const handleEdit = async (record: Environment) => {
         is_active: updatedRecord.is_active,
         variables: updatedRecord.variables || [],
         database_config: Number(updatedDatabaseConfig) || null,
-        verify_ssl: updatedRecord.verify_ssl !== false,
+        verify_ssl: updatedRecord.verify_ssl === true,
         database_config_info: (updatedRecord as any).database_config_info
       } as any
       
@@ -402,7 +402,7 @@ const handleEditSubmit = async () => {
           is_active: updatedEnv.is_active,
           variables: updatedEnv.variables || [],
           database_config: Number(updatedDatabaseConfig) || null,
-          verify_ssl: updatedEnv.verify_ssl !== false,
+          verify_ssl: updatedEnv.verify_ssl === true,
           database_config_info: (updatedEnv as any).database_config_info
         } as any
       }
@@ -427,7 +427,7 @@ const resetCreateForm = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
-    verify_ssl: true
+    verify_ssl: false
   }
 }
 
@@ -719,7 +719,7 @@ onMounted(() => {
                   <span class="detail-section-title font-medium">验证SSL</span>
                 </div>
                 <div class="detail-block p-3 rounded-lg break-all">
-                  {{ selectedEnvironment.verify_ssl !== false ? '是' : '否' }}
+                  {{ selectedEnvironment.verify_ssl === true ? '是' : '否' }}
                 </div>
               </div>
               

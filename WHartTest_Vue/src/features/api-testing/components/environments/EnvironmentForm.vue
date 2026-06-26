@@ -647,7 +647,7 @@ const handleSubmit = async () => {
                   <div class="flex items-center gap-3">
                     <a-switch
                       v-model="props.modelValue.verify_ssl"
-                      :default-checked="props.modelValue.verify_ssl !== false"
+                      :default-checked="props.modelValue.verify_ssl === true"
                     />
                     <span class="form-text-muted">验证SSL证书</span>
                     <a-tooltip content="启用时会验证HTTPS请求的SSL证书，禁用可以跳过SSL验证（不安全但在开发环境可能需要）">

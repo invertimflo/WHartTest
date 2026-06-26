@@ -483,7 +483,7 @@ class TestExecutionServiceTest(TestCase):
     def test_prepare_config_defaults(self):
         config = TestExecutionService._prepare_config({}, None)
         self.assertEqual(config['base_url'], '')
-        self.assertTrue(config['verify'])
+        self.assertFalse(config['verify'])
         self.assertEqual(config['variables'], {})
 
     def test_prepare_config_with_environment(self):
@@ -588,6 +588,101 @@ class TestExecutionServiceTest(TestCase):
         detail = report.details.get()
         self.assertTrue(detail.success)
         self.assertEqual(detail.response['status_code'], 500)
+
+
+class TestExecutionConfigSslTest(TestCase):
+    """SSL verify precedence tests for testcase execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='testpass')
+        self.project = Project.objects.create(name='Test Project', creator=self.user)
+
+    def test_prepare_config_testcase_verify_overrides_environment(self):
+        config = TestExecutionService._prepare_config(
+            {'verify': True},
+            {'verify_ssl': False},
+        )
+
+        self.assertTrue(config['verify'])
+
+    def test_prepare_config_uses_environment_verify_when_case_missing(self):
+        config = TestExecutionService._prepare_config(
+            {},
+            {'verify_ssl': False},
+        )
+
+        self.assertFalse(config['verify'])
+
+    def test_prepare_config_can_enable_verify_from_environment(self):
+        config = TestExecutionService._prepare_config(
+            {},
+            {'verify_ssl': True},
+        )
+
+        self.assertTrue(config['verify'])
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_keeps_testcase_verify_over_environment(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Test',
+            project=self.project,
+            created_by=self.user,
+            config={'verify': True},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': False})
+
+        self.assertTrue(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_uses_environment_verify_when_case_missing(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Env Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': False})
+
+        self.assertFalse(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_can_enable_verify_from_environment(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='SSL Env On Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/oauth/token'},
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+        runner.run_testcase({'verify_ssl': True})
+
+        self.assertTrue(runner.config.struct().verify)
+        mock_test_start.assert_called_once()
 
 
 class TestCaseRunnerSummaryTest(TestCase):
@@ -1794,6 +1889,7 @@ class TestExecutionServiceTest(TestCase):
         result = TestExecutionService._prepare_config(None, None)
         self.assertEqual(result['variables'], {})
         self.assertEqual(result['base_url'], '')
+        self.assertFalse(result['verify'])
 
     def test_prepare_config_string_variables(self):
         """字符串格式的变量被正确解析"""
