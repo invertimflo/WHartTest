@@ -28,7 +28,7 @@ const props = defineProps<{
       variables: string | Record<string, any>
       parameters: string | Record<string, any>
       export: string | string[]
-      verify: string | boolean
+      verify?: boolean
     }
   }
 }>()

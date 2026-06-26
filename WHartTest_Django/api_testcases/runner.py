@@ -74,6 +74,18 @@ class TestCaseRunner(HttpRunner):
     """Test case runner extending HttpRunner."""
 
     @staticmethod
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'true', '1', 'yes', 'on'}:
+                return True
+            if normalized in {'false', '0', 'no', 'off'}:
+                return False
+        return None
+
+    @staticmethod
     def _validators_indicate_failure(validators: Optional[Dict]) -> bool:
         """Return True when validators explicitly mark the step as failed."""
         if not isinstance(validators, dict) or not validators:
@@ -207,7 +219,14 @@ class TestCaseRunner(HttpRunner):
                 testcase.config = {}
 
             self.base_url = self.testcase.config.get('base_url', '')
-            self.verify = self.testcase.config.get('verify', None)
+            raw_verify = self.testcase.config.get('verify', None)
+            parsed_verify = self._coerce_bool(raw_verify)
+            self.case_verify_explicit = getattr(
+                testcase,
+                '_case_verify_explicit',
+                parsed_verify is not None,
+            )
+            self.verify = parsed_verify
             variables = self.testcase.config.get('variables', {})
             if isinstance(variables, str):
                 try:
@@ -469,6 +488,8 @@ class TestCaseRunner(HttpRunner):
             self.testcase.name,
         )
 
+        case_variables = self.variables.copy() if isinstance(self.variables, dict) else {}
+
         if environment:
             if environment.get('base_url'):
                 self.config.base_url(environment['base_url'])
@@ -477,6 +498,31 @@ class TestCaseRunner(HttpRunner):
                     self.trace_id,
                     self.testcase.id,
                     environment['base_url'],
+                )
+
+            verify_value = None
+            if 'verify_ssl' in environment:
+                verify_value = self._coerce_bool(environment.get('verify_ssl'))
+            elif 'verify' in environment:
+                verify_value = self._coerce_bool(environment.get('verify'))
+
+            if verify_value is not None and not getattr(self, 'case_verify_explicit', False):
+                self.verify = verify_value
+                self.config.verify(verify_value)
+                logger.info(
+                    "Using environment verify setting: trace_id=%s testcase_id=%s verify=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    verify_value,
+                )
+            elif verify_value is not None:
+                logger.info(
+                    "Keeping testcase verify setting over environment: "
+                    "trace_id=%s testcase_id=%s testcase_verify=%s environment_verify=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    self.verify,
+                    verify_value,
                 )
 
             if environment.get('variables'):
@@ -488,6 +534,8 @@ class TestCaseRunner(HttpRunner):
                 case_variables = self.variables.copy()
                 case_variables.update(env_variables)
                 self.config.variables(**case_variables)
+        elif isinstance(self.variables, dict):
+            self.config.variables(**case_variables)
 
         # Apply global request headers
         try:
