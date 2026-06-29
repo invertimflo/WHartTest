@@ -618,20 +618,50 @@ class TaskConsumer:
         
         return data_processor
 
-    def _build_page_step_config(self, data: dict, base_url: str = '', data_processor: Optional[DataProcessor] = None) -> PageStepConfig:
+    def _build_page_step_config(self, data: dict, base_url: str = '', data_processor: Optional[DataProcessor] = None, case_data_override: Optional[dict] = None) -> PageStepConfig:
         """构建页面步骤配置
         
         Args:
             data: 页面步骤数据
             base_url: 环境基础URL
             data_processor: 变量处理器，用于替换 ${{变量名}} 语法
+            case_data_override: 用例步骤的覆盖数据
         """
         steps = []
         
         for detail in data.get('step_details', []):
+            detail_id = str(detail.get('id', ''))
+            
             # 从 ope_value 中提取输入值
-            # 支持多种格式：{"text": "admin"}, {"value": "xxx"}, {"timeout": 3000}, 或纯字符串/数字
             ope_value = detail.get('ope_value', {})
+            
+            # 应用用例步骤的覆盖数据
+            if case_data_override and detail_id in case_data_override:
+                val = case_data_override[detail_id]
+                if isinstance(val, dict):
+                    # 如果覆盖数据本身是字典，直接合并
+                    if isinstance(ope_value, dict):
+                        ope_value = {**ope_value, **val}
+                    else:
+                        ope_value = val
+                else:
+                    # 否则，如果是字符串等简单类型，覆盖已有的主要参数
+                    if isinstance(ope_value, dict):
+                        for key in ['text', 'value', 'timeout', 'url', 'key', 'expected']:
+                            if key in ope_value:
+                                ope_value[key] = val
+                                break
+                        else:
+                            # 没找到已知键，且字典不为空，取第一个键
+                            if ope_value:
+                                first_key = next(iter(ope_value.keys()))
+                                ope_value[first_key] = val
+                            else:
+                                ope_value = {'text': val}
+                    else:
+                        ope_value = val
+            
+            # 支持多种格式：{"text": "admin"}, {"value": "xxx"}, {"timeout": 3000}, 或纯字符串/数字
             if isinstance(ope_value, dict):
                 # 按优先级尝试提取常见字段
                 input_value = (
@@ -640,6 +670,7 @@ class TaskConsumer:
                     ope_value.get('timeout') or  # wait 操作使用 timeout
                     ope_value.get('url') or      # goto 操作可能使用 url
                     ope_value.get('key') or      # press 操作可能使用 key
+                    ope_value.get('expected') or # 断言使用 expected
                     ''
                 )
                 # 如果所有已知字段都没有，且字典不为空，取第一个值
@@ -762,8 +793,9 @@ class TaskConsumer:
         
         for case_step in data.get('case_step_details', []):
             page_step_data = case_step.get('page_step', {})
+            case_data_override = case_step.get('case_data') or {}
             if page_step_data:
-                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor))
+                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor, case_data_override))
         
         return TestCaseConfig(
             case_id=data.get('id', 0),

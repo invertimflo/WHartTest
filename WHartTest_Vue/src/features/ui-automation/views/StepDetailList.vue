@@ -52,6 +52,12 @@
             </div>
             <div class="step-content">
               <span v-if="element.element_name" class="info-item">
+                <a-tag v-if="element.module_name" size="small" color="arcoblue" style="margin-right: 4px;">
+                  {{ element.module_name }}
+                </a-tag>
+                <a-tag v-if="element.page_name" size="small" color="cyan" style="margin-right: 4px;">
+                  {{ element.page_name }}
+                </a-tag>
                 <span class="info-label">{{ stepText.elementLabel }}</span>
                 <span class="element-name">{{ element.element_name }}</span>
               </span>
@@ -103,8 +109,47 @@
 
         <!-- 元素操作 -->
         <template v-if="formData.step_type === 0">
+          <a-form-item :label="stepText.selectModule">
+            <a-select
+              v-model="selectedElementModule"
+              :placeholder="stepText.pleaseSelectModule"
+              allow-search
+              allow-clear
+              @popup-visible-change="onModuleDropdownVisibleChange"
+              @change="onElementModuleChange"
+            >
+              <a-option
+                v-for="module in flatModuleOptions"
+                :key="module.id"
+                :value="module.id"
+                :label="getModuleOptionLabel(module)"
+              >
+                {{ getModuleOptionLabel(module) }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item :label="stepText.selectPage">
+            <a-select
+              v-model="selectedElementPage"
+              :placeholder="stepText.pleaseSelectPage"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementModule"
+              @change="onElementPageChange"
+            >
+              <a-option v-for="page in pageOptions" :key="page.id" :value="page.id">
+                {{ page.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
           <a-form-item field="element" :label="stepText.selectElement">
-            <a-select v-model="formData.element" :placeholder="stepText.pleaseSelectElement" allow-search allow-clear>
+            <a-select
+              v-model="formData.element"
+              :placeholder="stepText.pleaseSelectElement"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementPage"
+            >
               <a-option v-for="el in elementOptions" :key="el.id" :value="el.id">
                 {{ el.name }}
               </a-option>
@@ -162,8 +207,47 @@
 
         <!-- 断言操作 -->
         <template v-else-if="formData.step_type === 1">
+          <a-form-item :label="stepText.selectModule">
+            <a-select
+              v-model="selectedElementModule"
+              :placeholder="stepText.pleaseSelectModule"
+              allow-search
+              allow-clear
+              @popup-visible-change="onModuleDropdownVisibleChange"
+              @change="onElementModuleChange"
+            >
+              <a-option
+                v-for="module in flatModuleOptions"
+                :key="module.id"
+                :value="module.id"
+                :label="getModuleOptionLabel(module)"
+              >
+                {{ getModuleOptionLabel(module) }}
+              </a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item :label="stepText.selectPage">
+            <a-select
+              v-model="selectedElementPage"
+              :placeholder="stepText.pleaseSelectPage"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementModule"
+              @change="onElementPageChange"
+            >
+              <a-option v-for="page in pageOptions" :key="page.id" :value="page.id">
+                {{ page.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
           <a-form-item field="element" :label="stepText.assertElement">
-            <a-select v-model="formData.element" :placeholder="stepText.pleaseSelectElement" allow-search allow-clear>
+            <a-select
+              v-model="formData.element"
+              :placeholder="stepText.pleaseSelectElement"
+              allow-search
+              allow-clear
+              :disabled="!selectedElementPage"
+            >
               <a-option v-for="el in elementOptions" :key="el.id" :value="el.id">
                 {{ el.name }}
               </a-option>
@@ -237,8 +321,8 @@ import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconPlayArrow } from '@arco-design/web-vue/es/icon'
 import draggable from 'vuedraggable'
 import { useAppI18n } from '@/composables/useAppI18n'
-import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, type ActuatorInfo } from '../api'
-import type { UiPageStepsDetailed, UiPageSteps, UiElement, StepType, UiEnvironmentConfig } from '../types'
+import { pageStepsDetailedApi, elementApi, actuatorApi, envConfigApi, moduleApi, pageApi, type ActuatorInfo } from '../api'
+import type { UiPageStepsDetailed, UiPageSteps, UiElement, UiModule, UiPage, StepType, UiEnvironmentConfig } from '../types'
 import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 
@@ -314,6 +398,12 @@ const stepText = computed(() => isEnglish.value
       deleteActionConfirm: 'Delete this action?',
       editAction: 'Edit action',
       actionType: 'Action Type',
+      selectModule: 'Select module',
+      pleaseSelectModule: 'Please select a module',
+      selectPage: 'Select page',
+      pleaseSelectPage: 'Please select a page',
+      fetchModulesFailed: 'Failed to fetch module list',
+      fetchPagesFailed: 'Failed to fetch page list',
       selectElement: 'Select element',
       pleaseSelectElement: 'Please select an element',
       actionMethod: 'Action Method',
@@ -382,6 +472,12 @@ const stepText = computed(() => isEnglish.value
       deleteActionConfirm: '确定删除该操作？',
       editAction: '编辑操作',
       actionType: '操作类型',
+      selectModule: '选择模块',
+      pleaseSelectModule: '请选择模块',
+      selectPage: '选择页面',
+      pleaseSelectPage: '请选择页面',
+      fetchModulesFailed: '获取模块列表失败',
+      fetchPagesFailed: '获取页面列表失败',
       selectElement: '选择元素',
       pleaseSelectElement: '请选择元素',
       actionMethod: '操作方法',
@@ -493,7 +589,13 @@ const props = defineProps<{ pageStep: UiPageSteps }>()
 const loading = ref(false)
 const submitting = ref(false)
 const stepData = ref<UiPageStepsDetailed[]>([])
+const moduleOptions = ref<UiModule[]>([])
+const modulesLoading = ref(false)
+const flatModuleOptions = computed(() => flattenModules(moduleOptions.value))
+const pageOptions = ref<UiPage[]>([])
 const elementOptions = ref<UiElement[]>([])
+const selectedElementModule = ref<number | undefined>(undefined)
+const selectedElementPage = ref<number | undefined>(undefined)
 const modalVisible = ref(false)
 const isEdit = ref(false)
 const currentStep = ref<UiPageStepsDetailed | null>(null)
@@ -546,6 +648,107 @@ const stepTypeColors: Record<StepType, string> = {
   2: 'purple',
   3: 'green',
   4: 'magenta',
+}
+
+const flattenModules = (modules: UiModule[], level = 0): (UiModule & { __level?: number })[] => {
+  const result: (UiModule & { __level?: number })[] = []
+  modules.forEach(module => {
+    result.push({ ...module, __level: level })
+    if (module.children?.length) {
+      result.push(...flattenModules(module.children, level + 1))
+    }
+  })
+  return result
+}
+
+const getModuleOptionLabel = (module: UiModule & { __level?: number }) => `${'　'.repeat(module.__level || 0)}${module.name}`
+
+const fetchModules = async (force = false) => {
+  if (!props.pageStep.project || modulesLoading.value) return
+  if (!force && moduleOptions.value.length > 0) return
+  modulesLoading.value = true
+  try {
+    const res = await moduleApi.tree(props.pageStep.project)
+    const data = extractResponseData<UiModule[]>(res)
+    moduleOptions.value = Array.isArray(data) ? data : []
+  } catch {
+    Message.error(stepText.value.fetchModulesFailed)
+  } finally {
+    modulesLoading.value = false
+  }
+}
+
+const onModuleDropdownVisibleChange = async (visible: boolean) => {
+  if (visible) {
+    await fetchModules()
+  }
+}
+
+const fetchPages = async (moduleId?: number | null) => {
+  if (!moduleId) {
+    pageOptions.value = []
+    return
+  }
+  try {
+    const res = await pageApi.list({ project: props.pageStep.project, module: moduleId })
+    pageOptions.value = extractListData<UiPage>(res)
+  } catch {
+    Message.error(stepText.value.fetchPagesFailed)
+  }
+}
+
+const fetchElementsByPage = async (pageId?: number | null) => {
+  if (!pageId) {
+    elementOptions.value = []
+    return
+  }
+  try {
+    const res = await elementApi.list({ page: pageId })
+    elementOptions.value = extractListData<UiElement>(res)
+  } catch {
+    Message.error(stepText.value.fetchElementsFailed)
+  }
+}
+
+const initElementSelector = async (moduleId?: number | null, pageId?: number | null, elementId?: number | null) => {
+  selectedElementModule.value = moduleId || undefined
+  selectedElementPage.value = pageId || undefined
+  formData.element = elementId || null
+  await fetchModules()
+  await fetchPages(selectedElementModule.value)
+  await fetchElementsByPage(selectedElementPage.value)
+}
+
+const initElementSelectorFromElement = async (elementId?: number | null) => {
+  if (!elementId) {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, null)
+    return
+  }
+  try {
+    const elementRes = await elementApi.get(elementId)
+    const element = extractResponseData<UiElement>(elementRes)
+    if (!element?.page) {
+      await initElementSelector(props.pageStep.module, props.pageStep.page, elementId)
+      return
+    }
+    const pageRes = await pageApi.get(element.page)
+    const page = extractResponseData<UiPage>(pageRes)
+    await initElementSelector(page?.module || props.pageStep.module, element.page, elementId)
+  } catch {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, elementId)
+  }
+}
+
+const onElementModuleChange = async () => {
+  selectedElementPage.value = undefined
+  formData.element = null
+  elementOptions.value = []
+  await fetchPages(selectedElementModule.value)
+}
+
+const onElementPageChange = async () => {
+  formData.element = null
+  await fetchElementsByPage(selectedElementPage.value)
 }
 
 const fetchSteps = async () => {
@@ -650,12 +853,7 @@ const handleStepResult = (data: any) => {
 }
 
 const fetchElements = async () => {
-  try {
-    const res = await elementApi.list({ page: props.pageStep.page })
-    elementOptions.value = extractListData<UiElement>(res)
-  } catch {
-    Message.error(stepText.value.fetchElementsFailed)
-  }
+  await initElementSelector(props.pageStep.module, props.pageStep.page, formData.element || null)
 }
 
 const resetForm = () => {
@@ -670,6 +868,8 @@ const resetForm = () => {
     func: '',
     description: '',
   })
+  selectedElementModule.value = props.pageStep.module
+  selectedElementPage.value = props.pageStep.page
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   sqlExecuteStr.value = '{}'
   customStr.value = '{}'
@@ -677,18 +877,22 @@ const resetForm = () => {
   formRef.value?.clearValidate()
 }
 
-const onStepTypeChange = () => {
+const onStepTypeChange = async () => {
   formData.ope_key = ''
   formData.element = null
+  if (formData.step_type === 0 || formData.step_type === 1) {
+    await initElementSelector(props.pageStep.module, props.pageStep.page, null)
+  }
 }
 
-const showAddModal = () => {
+const showAddModal = async () => {
   isEdit.value = false
   resetForm()
   modalVisible.value = true
+  await initElementSelector(props.pageStep.module, props.pageStep.page, null)
 }
 
-const editStep = (step: UiPageStepsDetailed) => {
+const editStep = async (step: UiPageStepsDetailed) => {
   isEdit.value = true
   currentStep.value = step
   Object.assign(formData, {
@@ -702,6 +906,9 @@ const editStep = (step: UiPageStepsDetailed) => {
     func: step.func || '',
     description: step.description || '',
   })
+  if (step.step_type === 0 || step.step_type === 1) {
+    await initElementSelectorFromElement(step.element)
+  }
   // 从 ope_value 还原参数到 opeParams
   Object.keys(opeParams).forEach(k => delete opeParams[k])
   if (step.ope_value && typeof step.ope_value === 'object') {
@@ -847,9 +1054,11 @@ let offStepResult: (() => void) | null = null
 
 watch(() => props.pageStep, async () => {
   fetchSteps()
-  fetchElements()
-  // 同时获取环境配置和执行器列表，并自动选择默认值
+  moduleOptions.value = []
+  // 页面和元素按当前页面步骤默认值初始化；同时加载模块树确保初次渲染不会回显ID，支持跨模块/页面
   await Promise.all([
+    fetchModules(true),
+    fetchElements(),
     fetchActuators(),
     fetchEnvConfigs()
   ])

@@ -60,11 +60,23 @@ class UiPageDetailSerializer(UiPageSerializer):
 class UiPageStepsDetailedSerializer(serializers.ModelSerializer):
     """步骤详情序列化器"""
     element_name = serializers.CharField(source='element.name', read_only=True)
+    page_name = serializers.SerializerMethodField()
+    module_name = serializers.SerializerMethodField()
 
     class Meta:
         model = UiPageStepsDetailed
         fields = '__all__'
         read_only_fields = ['created_at', 'updated_at']
+
+    def get_page_name(self, obj):
+        if obj.element and obj.element.page:
+            return obj.element.page.name
+        return None
+
+    def get_module_name(self, obj):
+        if obj.element and obj.element.page and obj.element.page.module:
+            return obj.element.page.module.name
+        return None
 
 
 class UiPageStepsDetailedExecuteSerializer(serializers.ModelSerializer):
@@ -145,11 +157,23 @@ class UiPageStepsExecuteSerializer(UiPageStepsSerializer):
 class UiCaseStepsDetailedSerializer(serializers.ModelSerializer):
     """用例步骤序列化器"""
     page_step_name = serializers.CharField(source='page_step.name', read_only=True)
+    page_name = serializers.SerializerMethodField()
+    module_name = serializers.SerializerMethodField()
 
     class Meta:
         model = UiCaseStepsDetailed
         fields = '__all__'
         read_only_fields = ['status', 'error_message', 'result_data', 'created_at', 'updated_at']
+
+    def get_page_name(self, obj):
+        if obj.page_step and obj.page_step.page:
+            return obj.page_step.page.name
+        return None
+
+    def get_module_name(self, obj):
+        if obj.page_step and obj.page_step.module:
+            return obj.page_step.module.name
+        return None
 
 
 class UiCaseStepsWithDetailSerializer(serializers.ModelSerializer):
