@@ -74,11 +74,30 @@ RUN set -eux; \
     install_requirements
 
 # 预下载 BM25 稀疏编码模型（用于混合检索）
-# 使用 FASTEMBED_CACHE_PATH 环境变量强制指定缓存路径
-# 运行时会继承当前选择的 Hugging Face 下载地址
+# 优先使用随仓库提交的本地平铺模型目录（bm25_model/，实体文件无 symlink），
+# 通过 specific_model_path 直接离线加载，避免构建期依赖网络；
+# 仅当本地模型缺失时，才回退到联网下载（多 Hugging Face 端点轮询）。
 ENV HOME=/root
-RUN mkdir -p /root/.cache/fastembed && \
-    /opt/venv/bin/python <<'EOF' && ls -la /root/.cache/fastembed/
+
+COPY bm25_model /opt/bm25_model
+
+# 保证 HF 缓存目录存在（第二阶段 COPY --from=builder 需要该目录存在，即使为空）
+RUN mkdir -p /root/.cache/fastembed
+
+RUN set -eux; \
+    if [ -f /opt/bm25_model/config.json ]; then \
+      echo "Using local BM25 model directory, verifying offline load"; \
+      /opt/venv/bin/python <<'EOF'
+import os
+os.environ['HF_HUB_OFFLINE'] = '1'
+from fastembed import SparseTextEmbedding
+SparseTextEmbedding('Qdrant/bm25', specific_model_path='/opt/bm25_model')
+print("Successfully loaded BM25 model from local directory")
+EOF
+    else \
+      echo "Local BM25 model missing, downloading from Hugging Face..."; \
+      mkdir -p /root/.cache/fastembed; \
+      /opt/venv/bin/python <<'EOF'
 import os
 import traceback
 from fastembed import SparseTextEmbedding
@@ -92,7 +111,7 @@ for ep in endpoints:
     print(f"Trying to download model using HF_ENDPOINT: {ep}")
     os.environ['HF_ENDPOINT'] = ep
     try:
-        m = SparseTextEmbedding('Qdrant/bm25')
+        SparseTextEmbedding('Qdrant/bm25')
         success = True
         print(f"Successfully downloaded BM25 model using endpoint: {ep}")
         break
@@ -103,6 +122,7 @@ for ep in endpoints:
 if not success:
     raise RuntimeError('Failed to download BM25 model from all endpoints')
 EOF
+    fi
 
 # ============================================
 # 第二阶段：运行阶段（仅包含运行时依赖）
@@ -218,7 +238,10 @@ RUN npm config set registry "${NPM_REGISTRY}" && \
     npm install -g agent-browser && \
     agent-browser install
 
-# 从构建阶段复制预下载的 BM25 模型缓存
+# 复制随仓库提交的 BM25 平铺模型目录（运行时通过 specific_model_path 离线加载）
+COPY bm25_model /app/bm25_model
+
+# 兼容回退场景：构建阶段联网下载的 HF 缓存（若存在）一并带入运行阶段
 COPY --from=builder /root/.cache/fastembed /root/.cache/fastembed
 
 # 复制启动脚本和配置文件
