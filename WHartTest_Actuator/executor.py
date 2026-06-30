@@ -257,6 +257,41 @@ class PlaywrightExecutor:
         # 记录开始时间
         op_start = time.time()
         
+        # switch_tab 操作特殊处理
+        if operation == 'switch_tab':
+            if not page.context:
+                return False, "浏览器上下文为空，无法切换页签", None
+            
+            pages = page.context.pages
+            target_idx = None
+            try:
+                target_idx = int(step.input_value)
+            except (ValueError, TypeError):
+                pass
+            
+            if target_idx is not None:
+                if 0 <= target_idx < len(pages):
+                    self._page = pages[target_idx]
+                    logger.info(f"成功切换到页签索引: {target_idx}, URL: {self._page.url}")
+                    return True, f"成功切换到页签索引: {target_idx}", None
+                else:
+                    return False, f"切换页签失败，索引 {target_idx} 越界（当前共有 {len(pages)} 个页签）", None
+            else:
+                query = step.input_value.strip() if step.input_value else ''
+                if not query:
+                    return False, "切换页签参数为空，请输入索引、URL或页签标题", None
+                
+                for p in pages:
+                    try:
+                        title = await p.title()
+                        if query in p.url or query in title:
+                            self._page = p
+                            logger.info(f"成功切换到页签: title='{title}', url='{p.url}'")
+                            return True, f"成功切换到符合条件 '{query}' 的页签", None
+                    except Exception as e:
+                        logger.warning(f"获取页签属性失败: {e}")
+                return False, f"未找到匹配 '{query}' 的页签", None
+
         # screenshot 操作特殊处理，保存路径
         if operation == 'screenshot':
             screenshot_path = step.input_value or f"{self.screenshot_dir}/step_{step.step_id}.png"
@@ -444,6 +479,7 @@ class PlaywrightExecutor:
         try:
             # 使用带 trace 的浏览器会话
             async with self.browser_session_with_trace(trace_name) as page:
+                self._page = page
                 logger.info(f"开始执行用例: {config.case_name}")
                 self._page_errors = []
                 self._setup_page_listeners(page)
@@ -454,13 +490,16 @@ class PlaywrightExecutor:
                     base_url = config.env_config.get('base_url', '') or ''
                 if base_url:
                     logger.info(f"导航到环境 base_url: {base_url}")
-                    await page.goto(base_url, wait_until="networkidle")
+                    await self._page.goto(base_url, wait_until="networkidle")
 
                 for page_step in config.page_steps:
                     if self._stop_requested:
                         raise Exception("用例被手动停止")
 
                     logger.info(f"执行页面步骤: {page_step.page_name}")
+
+                    # 确保使用最新的页签引用进行环境跳转检测
+                    page = self._page
 
                     # 检测页面跳转：仅当下一个页面 URL 与当前不同时才等待
                     if page_step.page_url:
@@ -485,9 +524,16 @@ class PlaywrightExecutor:
                         if self._stop_requested:
                             raise Exception("用例被手动停止")
                         
+                        # 确保总是使用最新的活跃页签进行操作
+                        page = self._page
+                        
                         step_start = time.time()
                         try:
                             success, message, step_screenshot = await self._execute_step(page, step)
+                            
+                            # 执行后重新同步页签引用，以防步骤内发生了页签切换
+                            page = self._page
+                            
                             step_duration = time.time() - step_start
 
                             step_result = StepResultModel(

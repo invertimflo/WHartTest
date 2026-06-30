@@ -182,6 +182,7 @@
                 <a-option value="reload">{{ stepText.reloadOption }}</a-option>
                 <a-option value="go_back">{{ stepText.goBackOption }}</a-option>
                 <a-option value="go_forward">{{ stepText.goForwardOption }}</a-option>
+                <a-option value="switch_tab">{{ stepText.switchTabOption }}</a-option>
                 <a-option value="wait">{{ stepText.waitOption }}</a-option>
                 <a-option value="wait_load">{{ stepText.waitLoadOption }}</a-option>
                 <a-option value="wait_network">{{ stepText.waitNetworkOption }}</a-option>
@@ -375,6 +376,7 @@ const OPE_PARAMS_MAP: Record<string, OpeParamDef[]> = {
   press: [{ field: 'key', label: '按键值', type: 'input', placeholder: '例如 Enter, Tab, Escape 等', required: true }],
   upload: [{ field: 'value', label: '文件路径', type: 'input', placeholder: '请输入要上传的文件绝对路径', required: true }],
   goto: [{ field: 'url', label: '目标 URL', type: 'input', placeholder: '请输入完整的网页地址，例如 https://www.google.com', required: true }],
+  switch_tab: [{ field: 'value', label: '页签索引或关键字', type: 'input', placeholder: '请输入页签索引(从0开始)或URL/标题关键字', required: true }],
   // 断言操作
   assert_text: [{ field: 'expected', label: '期望文本', type: 'input', placeholder: '请输入期望的文本内容', required: true }],
   assert_contain_text: [{ field: 'expected', label: '期望包含的文本', type: 'input', placeholder: '请输入期望被包含的文本', required: true }],
@@ -402,6 +404,7 @@ const OPE_KEY_LABELS: Record<string, string> = {
   reload: '刷新页面',
   go_back: '页面后退',
   go_forward: '页面前进',
+  switch_tab: '切换页签',
   wait: '等待',
   wait_load: '等待页面加载',
   wait_network: '等待网络空闲',
@@ -481,6 +484,7 @@ const stepText = computed(() => isEnglish.value
       reloadOption: 'Reload page (reload)',
       goBackOption: 'Go back (go_back)',
       goForwardOption: 'Go forward (go_forward)',
+      switchTabOption: 'Switch tab (switch_tab)',
       waitOption: 'Wait (wait)',
       waitLoadOption: 'Wait for load (wait_load)',
       waitNetworkOption: 'Wait for network idle (wait_network)',
@@ -580,6 +584,7 @@ const stepText = computed(() => isEnglish.value
       reloadOption: '刷新页面 (reload)',
       goBackOption: '页面后退 (go_back)',
       goForwardOption: '页面前进 (go_forward)',
+      switchTabOption: '切换页签 (switch_tab)',
       waitOption: '等待 (wait)',
       waitLoadOption: '等待加载 (wait_load)',
       waitNetworkOption: '等待网络空闲 (wait_network)',
@@ -658,6 +663,7 @@ const opeKeyLabelsEn: Record<string, string> = {
   reload: 'Reload page',
   go_back: 'Go back',
   go_forward: 'Go forward',
+  switch_tab: 'Switch tab',
   wait: 'Wait',
   wait_load: 'Wait for load',
   wait_network: 'Wait for network idle',
@@ -683,6 +689,7 @@ const paramLabelMap: Record<string, string> = {
   '按键值': 'Key value',
   '文件路径': 'File path',
   '目标 URL': 'Target URL',
+  '页签索引或关键字': 'Tab index or keyword',
   '期望文本': 'Expected text',
   '期望包含的文本': 'Expected contained text',
   '期望值': 'Expected value',
@@ -700,6 +707,7 @@ const paramPlaceholderMap: Record<string, string> = {
   '例如 Enter, Tab, Escape 等': 'e.g. Enter, Tab, Escape etc.',
   '请输入要上传的文件绝对路径': 'Enter the absolute path to upload',
   '请输入完整的网页地址，例如 https://www.google.com': 'Enter full URL, e.g. https://www.google.com',
+  '请输入页签索引(从0开始)或URL/标题关键字': 'Enter tab index (0-based) or URL/title keyword',
   '请输入期望的文本内容': 'Enter the expected text',
   '请输入期望被包含的文本': 'Enter the expected contained text',
   '请输入期望的值': 'Enter the expected value',
