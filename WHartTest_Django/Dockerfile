@@ -80,6 +80,8 @@ RUN set -eux; \
 ENV HOME=/root
 
 COPY bm25_model /opt/bm25_model
+COPY docker/verify_bm25.py /tmp/verify_bm25.py
+COPY docker/download_bm25.py /tmp/download_bm25.py
 
 # 保证 HF 缓存目录存在（第二阶段 COPY --from=builder 需要该目录存在，即使为空）
 RUN mkdir -p /root/.cache/fastembed
@@ -87,41 +89,11 @@ RUN mkdir -p /root/.cache/fastembed
 RUN set -eux; \
     if [ -f /opt/bm25_model/config.json ]; then \
       echo "Using local BM25 model directory, verifying offline load"; \
-      /opt/venv/bin/python <<'EOF'
-import os
-os.environ['HF_HUB_OFFLINE'] = '1'
-from fastembed import SparseTextEmbedding
-SparseTextEmbedding('Qdrant/bm25', specific_model_path='/opt/bm25_model')
-print("Successfully loaded BM25 model from local directory")
-EOF
+      /opt/venv/bin/python /tmp/verify_bm25.py; \
     else \
       echo "Local BM25 model missing, downloading from Hugging Face..."; \
       mkdir -p /root/.cache/fastembed; \
-      /opt/venv/bin/python <<'EOF'
-import os
-import traceback
-from fastembed import SparseTextEmbedding
-
-os.environ['FASTEMBED_CACHE_PATH'] = '/root/.cache/fastembed'
-endpoints = [os.environ.get('HF_ENDPOINT'), 'https://hf-mirror.com', 'https://huggingface.co']
-success = False
-for ep in endpoints:
-    if not ep:
-        continue
-    print(f"Trying to download model using HF_ENDPOINT: {ep}")
-    os.environ['HF_ENDPOINT'] = ep
-    try:
-        SparseTextEmbedding('Qdrant/bm25')
-        success = True
-        print(f"Successfully downloaded BM25 model using endpoint: {ep}")
-        break
-    except Exception as e:
-        traceback.print_exc()
-        print(f"Failed download with endpoint {ep}: {e}")
-
-if not success:
-    raise RuntimeError('Failed to download BM25 model from all endpoints')
-EOF
+      /opt/venv/bin/python /tmp/download_bm25.py; \
     fi
 
 # ============================================
