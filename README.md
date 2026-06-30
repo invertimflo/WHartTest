@@ -74,13 +74,13 @@ https://docs.wharttest.mgdaas.com/
 如有问题或建议，请通过以下方式联系：
 - 提交 Issue
 - 项目讨论区
-- 添加微信时请备注   github ! ! !，拉你进微信群聊。
-- 加群获取最新更新信息及SKill。
+- 微信群聊。
+- 加群获取最新更新信息。
 
  
-## 添加微信时：请备注   Github 或 WHartTest ! ! ! 
+## 添加群聊
 
-<img width="400" alt="image" src="img/wx.jpg" />
+<img width="400" alt="image" src="img/wx.png" />
 
 
 ---

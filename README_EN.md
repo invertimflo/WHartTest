@@ -115,7 +115,7 @@ For questions or suggestions:
 
 ## When adding WeChat: please mention Github or WHartTest!!!
 
-<img width="400" alt="image" src="img/wx.jpg" />
+<img width="400" alt="image" src="img/wx.png" />
 
 ---
 
