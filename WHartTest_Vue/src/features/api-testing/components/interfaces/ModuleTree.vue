@@ -10,7 +10,8 @@ import {
   IconRight,
   IconDown,
   IconSend,
-  IconEdit
+  IconEdit,
+  IconCopy
 } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
 
@@ -37,6 +38,7 @@ const emit = defineEmits<{
   (e: 'delete', module: ApiModule): void
   (e: 'edit-interface', api: ApiInterface): void
   (e: 'delete-interface', api: ApiInterface): void
+  (e: 'copy-interface', api: ApiInterface): void
   (e: 'run-interface', api: ApiInterface): void
   (e: 'select-interface', api: ApiInterface): void
 }>()
@@ -348,6 +350,15 @@ const handleDrop = async (e: DragEvent) => {
                   type="text"
                   size="mini"
                   class="module-tree__action-btn !p-0"
+                  @click.stop="emit('copy-interface', api)"
+                  title="复制接口"
+                >
+                  <template #icon><icon-copy /></template>
+                </a-button>
+                <a-button
+                  type="text"
+                  size="mini"
+                  class="module-tree__action-btn !p-0"
                   @click.stop="emit('delete-interface', api)"
                   title="删除接口"
                 >
@@ -377,6 +388,7 @@ const handleDrop = async (e: DragEvent) => {
           @delete="emit('delete', $event)"
           @edit-interface="emit('edit-interface', $event)"
           @delete-interface="emit('delete-interface', $event)"
+          @copy-interface="emit('copy-interface', $event)"
           @run-interface="emit('run-interface', $event)"
           @select-interface="emit('select-interface', $event)"
         />

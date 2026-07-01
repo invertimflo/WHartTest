@@ -156,6 +156,7 @@
           <a-button type="primary" size="mini" @click.stop="handleViewTestCase(record)">{{ pageText.view }}</a-button>
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
+          <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
           <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
       </template>
@@ -188,6 +189,7 @@ import ExportModal from '@/features/testcase-templates/components/ExportModal.vu
 import {
   getTestCaseList,
   deleteTestCase as deleteTestCaseService,
+  copyTestCase as copyTestCaseService,
   batchDeleteTestCases,
   updateTestCaseReviewStatus,
   type TestCase,
@@ -208,6 +210,7 @@ const emit = defineEmits<{
   (e: 'editTestCase', testCase: TestCase): void;
   (e: 'viewTestCase', testCase: TestCase): void;
   (e: 'testCaseDeleted'): void;
+  (e: 'testCaseCopied'): void;
   (e: 'executeTestCase', testCase: TestCase): void;
   (e: 'module-filter-change', moduleId: number | null): void;
   (e: 'requestOptimization', testCase: TestCase): void;
@@ -237,6 +240,7 @@ const pageText = computed(() => (
         edit: 'Edit',
         execute: 'Run',
         delete: 'Delete',
+        copy: 'Copy',
         select: 'Select',
         caseName: 'Case name',
         precondition: 'Precondition',
@@ -259,6 +263,9 @@ const pageText = computed(() => (
         deleteCaseSuccess: 'Test case deleted successfully',
         deleteCaseFailed: 'Failed to delete test case',
         deleteCaseError: 'An error occurred while deleting the test case',
+        copyCaseSuccess: 'Test case copied successfully',
+        copyCaseFailed: 'Failed to copy test case',
+        copyCaseError: 'An error occurred while copying the test case',
         confirmBatchDeleteTitle: 'Confirm batch deletion',
         confirmBatchDeleteContent: (count: number, names: string) => `Delete ${count} test case(s)? This action cannot be undone.\n\n${names}`,
         confirmBatchDeleteOk: 'Delete',
@@ -286,6 +293,7 @@ const pageText = computed(() => (
         edit: '编辑',
         execute: '执行',
         delete: '删除',
+        copy: '复制',
         select: '选择',
         caseName: '用例名称',
         precondition: '前置条件',
@@ -308,6 +316,9 @@ const pageText = computed(() => (
         deleteCaseSuccess: '测试用例删除成功',
         deleteCaseFailed: '删除测试用例失败',
         deleteCaseError: '删除测试用例时发生错误',
+        copyCaseSuccess: '测试用例复制成功',
+        copyCaseFailed: '复制测试用例失败',
+        copyCaseError: '复制测试用例时发生错误',
         confirmBatchDeleteTitle: '确认批量删除',
         confirmBatchDeleteContent: (count: number, names: string) => `确定要删除以下 ${count} 个测试用例吗？此操作不可恢复。\n\n${names}`,
         confirmBatchDeleteOk: '确认删除',
@@ -415,7 +426,7 @@ const handleResize = () => {
 
 // 表格滚动配置
 const tableScroll = computed(() => ({
-  x: 1030,
+  x: 1070,
   y: tableContainerHeight.value,
 }));
 
@@ -547,7 +558,7 @@ const columns = computed(() => [
     align: 'center',
     sortable: { sortDirections: ['ascend', 'descend'], sortOrder: getSortOrder('updated_at') },
   },
-  { title: pageText.value.actions, slotName: 'operations', width: 200, fixed: 'right', align: 'center' },
+  { title: pageText.value.actions, slotName: 'operations', width: 240, fixed: 'right', align: 'center' },
 ]);
 
 const fetchTestCases = async () => {
@@ -702,6 +713,27 @@ const handleViewTestCase = (testCase: TestCase) => {
 
 const handleEditTestCase = (testCase: TestCase) => {
   emit('editTestCase', testCase);
+};
+
+const handleCopyTestCase = async (testCase: TestCase) => {
+  if (!currentProjectId.value) return;
+
+  try {
+    loading.value = true;
+    const response = await copyTestCaseService(currentProjectId.value, testCase.id);
+    if (response.success) {
+      Message.success(pageText.value.copyCaseSuccess);
+      await fetchTestCases();
+      emit('testCaseCopied');
+    } else {
+      Message.error(response.error || pageText.value.copyCaseFailed);
+    }
+  } catch (error) {
+    console.error('复制测试用例出错:', error);
+    Message.error(pageText.value.copyCaseError);
+  } finally {
+    loading.value = false;
+  }
 };
 
 const handleDeleteTestCase = (testCase: TestCase) => {

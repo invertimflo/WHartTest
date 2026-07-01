@@ -231,23 +231,42 @@ class ApiTestCaseViewSet(BaseModelViewSet):
 
     @action(detail=True, methods=['post'])
     def copy(self, request, pk=None, **kwargs):
-        testcase = self.get_object()
+        source = self.get_object()
+        project_pk = self.kwargs.get('project_pk')
 
         with transaction.atomic():
-            original_pk = testcase.pk
-            testcase.pk = None
-            testcase.name = f"{testcase.name}_copy"
-            testcase.created_by = request.user
-            testcase.save()
+            base_name = request.data.get('name') or f"{source.name}_copy"
+            candidate_name = base_name
+            suffix = 2
+            while ApiTestCase.objects.filter(project_id=project_pk, name=candidate_name).exists():
+                candidate_name = f"{base_name}{suffix}"
+                suffix += 1
 
-            original = ApiTestCase.objects.get(pk=original_pk)
-            testcase.tags.set(original.tags.all())
+            testcase = ApiTestCase.objects.create(
+                name=candidate_name,
+                description=source.description,
+                priority=source.priority,
+                config=source.config,
+                file_ids=source.file_ids,
+                project=source.project,
+                group=source.group,
+                created_by=request.user,
+            )
+            testcase.tags.set(source.tags.all())
 
-            steps = ApiTestCaseStep.objects.filter(testcase_id=original_pk)
+            steps = ApiTestCaseStep.objects.filter(testcase=source).order_by('order')
             for step in steps:
-                step.pk = None
-                step.testcase = testcase
-                step.save()
+                ApiTestCaseStep.objects.create(
+                    name=step.name,
+                    order=step.order,
+                    interface_data=step.interface_data,
+                    config=step.config,
+                    file_ids=step.file_ids,
+                    testcase=testcase,
+                    origin_interface=step.origin_interface,
+                    sync_fields=step.sync_fields,
+                    last_sync_time=step.last_sync_time,
+                )
 
         serializer = self.get_serializer(testcase)
         return Response(serializer.data)

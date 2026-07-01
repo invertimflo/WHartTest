@@ -8,6 +8,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models.deletion import ProtectedError
 from django.db import transaction
+from copy import deepcopy
 from file_management.services import maybe_cleanup_unreferenced_files, sync_file_references
 
 from .models import (
@@ -290,6 +291,57 @@ class UiPageViewSet(viewsets.ModelViewSet):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制页面，并复制页面下的元素。"""
+        source = self.get_object()
+        target_module_id = request.data.get('target_module_id') or request.data.get('module')
+
+        if target_module_id:
+            target_module = UiModule.objects.get(pk=target_module_id, project=source.project)
+        else:
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiPage.objects.filter(project=source.project, module=target_module, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_page = UiPage.objects.create(
+                project=source.project,
+                module=target_module,
+                name=candidate_name,
+                url=source.url,
+                description=source.description,
+                creator=request.user,
+            )
+
+            for element in source.elements.all():
+                UiElement.objects.create(
+                    page=copied_page,
+                    name=element.name,
+                    locator_type=element.locator_type,
+                    locator_value=element.locator_value,
+                    locator_index=element.locator_index,
+                    locator_type_2=element.locator_type_2,
+                    locator_value_2=element.locator_value_2,
+                    locator_index_2=element.locator_index_2,
+                    locator_type_3=element.locator_type_3,
+                    locator_value_3=element.locator_value_3,
+                    locator_index_3=element.locator_index_3,
+                    wait_time=element.wait_time,
+                    is_iframe=element.is_iframe,
+                    iframe_locator=element.iframe_locator,
+                    description=element.description,
+                    creator=request.user,
+                )
+
+        serializer = self.get_serializer(copied_page)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 
 class UiElementViewSet(viewsets.ModelViewSet):
     """元素管理视图"""
@@ -344,6 +396,67 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制页面步骤，并复制其步骤详情。"""
+        source = self.get_object()
+        target_page_id = request.data.get('target_page_id') or request.data.get('page')
+
+        if target_page_id:
+            target_page = UiPage.objects.get(pk=target_page_id, project=source.project)
+            target_module = target_page.module
+        else:
+            target_page = source.page
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiPageSteps.objects.filter(project=source.project, page=target_page, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_step = UiPageSteps.objects.create(
+                project=source.project,
+                page=target_page,
+                module=target_module,
+                name=candidate_name,
+                description=source.description,
+                run_flow=source.run_flow,
+                flow_data=deepcopy(source.flow_data or {}),
+                file_ids=deepcopy(source.file_ids or []),
+                status=0,
+                result_data=None,
+                creator=request.user,
+            )
+            sync_file_references(
+                copied_step.file_ids or [],
+                copied_step.project,
+                FileReference.REF_UI_PAGE_STEPS,
+                copied_step.id,
+                request.user,
+            )
+
+            for detail in source.step_details.all().order_by('step_sort'):
+                copied_detail = UiPageStepsDetailed.objects.create(
+                    page_step=copied_step,
+                    step_type=detail.step_type,
+                    element=detail.element,
+                    step_sort=detail.step_sort,
+                    ope_key=detail.ope_key,
+                    ope_value=deepcopy(detail.ope_value),
+                    sql_execute=deepcopy(detail.sql_execute),
+                    custom=deepcopy(detail.custom),
+                    condition_value=deepcopy(detail.condition_value),
+                    func=detail.func,
+                    description=detail.description,
+                )
+                _sync_upload_step_file_reference(copied_detail, request.user)
+
+        serializer = self.get_serializer(copied_step)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'], url_path='execute-data')
     def execute_data(self, request, pk=None):
@@ -446,6 +559,68 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='copy')
+    def copy(self, request, pk=None):
+        """复制 UI 自动化测试用例，并复制用例步骤。"""
+        source = self.get_object()
+        target_module_id = request.data.get('target_module_id') or request.data.get('module')
+
+        if target_module_id:
+            target_module = UiModule.objects.get(pk=target_module_id, project=source.project)
+        else:
+            target_module = source.module
+
+        with transaction.atomic():
+            base_name = request.data.get('name') or f'{source.name} - 副本'
+            candidate_name = base_name
+            suffix = 2
+            while UiTestCase.objects.filter(project=source.project, module=target_module, name=candidate_name).exists():
+                candidate_name = f'{base_name} {suffix}'
+                suffix += 1
+
+            copied_case = UiTestCase.objects.create(
+                project=source.project,
+                module=target_module,
+                name=candidate_name,
+                description=source.description,
+                level=source.level,
+                status=0,
+                front_custom=deepcopy(source.front_custom or []),
+                front_sql=deepcopy(source.front_sql or []),
+                posterior_sql=deepcopy(source.posterior_sql or []),
+                parametrize=deepcopy(source.parametrize or []),
+                case_flow=source.case_flow,
+                file_ids=deepcopy(source.file_ids or []),
+                result_data=None,
+                error_message=None,
+                creator=request.user,
+            )
+            sync_file_references(
+                copied_case.file_ids or [],
+                copied_case.project,
+                FileReference.REF_UI_TESTCASE,
+                copied_case.id,
+                request.user,
+            )
+
+            for case_step in source.case_steps.all().order_by('case_sort'):
+                UiCaseStepsDetailed.objects.create(
+                    test_case=copied_case,
+                    page_step=case_step.page_step,
+                    case_sort=case_step.case_sort,
+                    case_data=deepcopy(case_step.case_data),
+                    case_cache_data=deepcopy(case_step.case_cache_data),
+                    case_cache_ass=deepcopy(case_step.case_cache_ass),
+                    switch_step_open_url=case_step.switch_step_open_url,
+                    error_retry=case_step.error_retry,
+                    status=0,
+                    error_message=None,
+                    result_data=None,
+                )
+
+        serializer = self.get_serializer(copied_case)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='batch-delete')
     def batch_delete(self, request, **kwargs):

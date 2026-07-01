@@ -3,9 +3,9 @@ import { ref, onMounted, watch, computed, nextTick, provide } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import { useProjectStore } from '@/store/projectStore'
-import { IconPlus, IconSearch, IconFolder, IconEdit, IconDelete, IconList, IconApps, IconInfoCircle, IconSend } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconSearch, IconFolder, IconEdit, IconDelete, IconList, IconApps, IconInfoCircle, IconSend, IconCopy } from '@arco-design/web-vue/es/icon'
 import type { ApiModule, PaginatedData, ApiInterface } from '../../services/interfaceService'
-import { getInterfaces, getInterfaceById, deleteInterface } from '../../services/interfaceService'
+import { getInterfaces, getInterfaceById, deleteInterface, duplicateInterface } from '../../services/interfaceService'
 import { getModules, createModule, updateModule, deleteModule, moveModule } from '../../services/moduleService'
 import { toArray } from '../../services/responseHelpers'
 import ApiDetail from './ApiDetail.vue'
@@ -525,6 +525,52 @@ const removeInterfacesFromLocalLists = (interfaceIds: number[]) => {
 }
 
 // 删除接口
+
+// 复制接口
+const handleCopyInterface = async (api: ApiInterface) => {
+  if (!api.id) return
+
+  try {
+    loading.value = true
+    const response = await duplicateInterface(api.id)
+    const copiedInterface = response.data
+    Message.success('复制接口成功')
+
+    // 复制后同步刷新模块树、当前模块接口列表、无模块分组数量和右侧分页列表
+    await fetchApiModules()
+
+    if (copiedInterface?.module) {
+      if (!expandedIds.value.includes(copiedInterface.module)) {
+        expandedIds.value.push(copiedInterface.module)
+      }
+      await fetchInterfaces(copiedInterface.module)
+
+      // ModuleTree 子组件内部也有接口列表缓存，通过重置展开状态触发子组件重新拉取
+      const expandedIndex = expandedIds.value.indexOf(copiedInterface.module)
+      if (expandedIndex > -1) {
+        expandedIds.value.splice(expandedIndex, 1)
+        nextTick(() => {
+          expandedIds.value.push(copiedInterface.module)
+        })
+      }
+    } else {
+      await fetchNoModuleInterfaces()
+    }
+
+    await fetchInterfaceListForDisplay()
+
+    if (copiedInterface) {
+      selectedInterface.value = copiedInterface
+      tabsStore.openOrActivateInterface(copiedInterface)
+      viewMode.value = 'detail'
+    }
+  } catch (error: any) {
+    Message.error(error.message || '复制接口失败')
+  } finally {
+    loading.value = false
+  }
+}
+
 const handleDeleteInterface = (api: ApiInterface) => {
   const modalLoading = ref(false)
 
@@ -1067,6 +1113,15 @@ watch(() => tabsStore.tabs, () => {
                                     type="text"
                                     size="mini"
                                     class="!p-0 !text-[#6b7785] hover:!text-[#86909c]"
+                                    @click.stop="handleCopyInterface(api)"
+                                    title="复制接口"
+                                  >
+                                    <template #icon><icon-copy /></template>
+                                  </a-button>
+                                  <a-button
+                                    type="text"
+                                    size="mini"
+                                    class="!p-0 !text-[#6b7785] hover:!text-[#86909c]"
                                     @click.stop="handleDeleteInterface(api)"
                                   >
                                     <template #icon><icon-delete /></template>
@@ -1095,6 +1150,7 @@ watch(() => tabsStore.tabs, () => {
                       @delete="handleDelete"
                       @edit-interface="handleEditInterface"
                       @delete-interface="handleDeleteInterface"
+                      @copy-interface="handleCopyInterface"
                       @run-interface="handleRunInterface"
                       @select-interface="handleSelectInterface"
                     />
@@ -1131,6 +1187,7 @@ watch(() => tabsStore.tabs, () => {
             @interface-select="handleSelectInterface"
             @interface-edit="handleEditInterface"
             @interface-delete="handleDeleteInterface"
+            @interface-copy="handleCopyInterface"
             @interface-run="handleInterfaceRun"
           />
         </div>
