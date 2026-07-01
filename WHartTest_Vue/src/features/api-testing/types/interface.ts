@@ -29,6 +29,7 @@ export interface ApiInterface {
   headers: ApiKeyValuePair[];
   params: ApiKeyValuePair[];
   body: ApiRequestBody;
+  file_ids: number[];
 
   // SQL fields
   sql_method: SqlMethod | null;

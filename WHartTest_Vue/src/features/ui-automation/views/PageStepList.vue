@@ -110,7 +110,15 @@
         <a-form-item field="description" :label="pageText.description">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterDescription" :auto-size="{ minRows: 2 }" />
         </a-form-item>
-      </a-form>
+      
+          <a-form-item label="附件">
+            <FileAttachmentPicker
+              v-model="formData.file_ids"
+              :project-id="projectStore.currentProjectId || 0"
+              button-text="上传附件"
+            />
+          </a-form-item>
+</a-form>
     </a-modal>
 
     <!-- 步骤详情抽屉 -->
@@ -126,6 +134,7 @@
 </template>
 
 <script setup lang="ts">
+import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconSettings } from '@arco-design/web-vue/es/icon'
@@ -243,6 +252,7 @@ const filters = reactive({ page: undefined as number | undefined, module: undefi
 const pagination = reactive({ current: 1, pageSize: 10, total: 0, showTotal: true, showPageSize: true })
 
 const formData = reactive<UiPageStepsForm>({
+  file_ids: [],
   project: 0,
   page: undefined as unknown as number,
   module: undefined as unknown as number,
@@ -361,7 +371,7 @@ const onPageSizeChange = (pageSize: number) => {
 }
 
 const resetForm = () => {
-  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', flow_data: {} })
+  Object.assign(formData, { project: projectId.value || 0, page: undefined, module: undefined, name: '', description: '', run_flow: '', flow_data: {}, file_ids: [] })
   formRef.value?.clearValidate()
 }
 

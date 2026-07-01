@@ -1,4 +1,5 @@
 from django.contrib.auth.models import User
+from django.core.files.base import ContentFile
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -12,12 +13,14 @@ from ui_automation.models import (
     UiPageStepsDetailed,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
+from file_management.models import FileAsset, FileReference
 
 
 class UiPageStepsExecuteDataTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='tester', password='secret')
+        self.user = User.objects.create_superuser(username='tester', password='secret')
         self.project = Project.objects.create(name='Demo Project')
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
         self.module = UiModule.objects.create(
             project=self.project,
             name='Module A',
@@ -71,6 +74,154 @@ class UiPageStepsExecuteDataTests(TestCase):
         self.assertEqual(detail['locator_value_3'], 'Submit')
         self.assertTrue(detail['is_iframe'])
         self.assertEqual(detail['iframe_locator'], 'iframe.login-frame')
+
+    def test_execute_data_resolves_upload_file_id_to_file_path(self):
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='avatar.png',
+            mime_type='image/png',
+            size=5,
+            sha256='abc',
+        )
+        asset.file.save('avatar.png', ContentFile(b'hello'), save=True)
+        UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            element=self.element,
+            ope_key='upload',
+            ope_value={'file_id': asset.id, 'file_name': 'avatar.png', 'value': f'file_id:{asset.id}'},
+            step_sort=1,
+        )
+        response = UiPageStepsExecuteSerializer(self.page_step).data
+        upload_detail = next(item for item in response['step_details'] if item.get('ope_key') == 'upload')
+        self.assertEqual(upload_detail['ope_value']['file_id'], asset.id)
+        self.assertEqual(upload_detail['ope_value']['file_name'], 'avatar.png')
+        self.assertIn('file_management/projects/', upload_detail['ope_value']['file_path'])
+        self.assertEqual(upload_detail['ope_value']['value'], upload_detail['ope_value']['file_path'])
+
+    def test_delete_upload_step_keeps_file_when_auto_delete_disabled(self):
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='delete-me.txt',
+            mime_type='text/plain',
+            size=5,
+            sha256='def',
+        )
+        asset.file.save('delete-me.txt', ContentFile(b'hello'), save=True)
+        storage = asset.file.storage
+        storage_name = asset.file.name
+        upload_step = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            element=self.element,
+            ope_key='upload',
+            ope_value={'file_id': asset.id, 'file_name': 'delete-me.txt', 'value': f'file_id:{asset.id}'},
+            step_sort=2,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.delete(f'/api/ui-automation/page-steps-detailed/{upload_step.id}/')
+        self.assertIn(response.status_code, (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT))
+        self.assertTrue(FileAsset.objects.filter(id=asset.id).exists())
+        self.assertTrue(storage.exists(storage_name))
+
+    def test_delete_upload_step_keeps_file_when_no_reference_exists_even_if_enabled(self):
+        from file_management.models import FileManagementSetting
+        FileManagementSetting.objects.update_or_create(
+            project=self.project,
+            defaults={'auto_delete_on_unbind': True},
+        )
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='delete-me-enabled.txt',
+            mime_type='text/plain',
+            size=5,
+            sha256='ghi',
+        )
+        asset.file.save('delete-me-enabled.txt', ContentFile(b'hello'), save=True)
+        storage = asset.file.storage
+        storage_name = asset.file.name
+        upload_step = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            element=self.element,
+            ope_key='upload',
+            ope_value={'file_id': asset.id, 'file_name': 'delete-me-enabled.txt', 'value': f'file_id:{asset.id}'},
+            step_sort=3,
+        )
+
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.delete(f'/api/ui-automation/page-steps-detailed/{upload_step.id}/')
+        self.assertIn(response.status_code, (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT))
+        self.assertTrue(FileAsset.objects.filter(id=asset.id).exists())
+        self.assertTrue(storage.exists(storage_name))
+
+    def test_create_upload_step_creates_file_reference_count(self):
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='referenced.txt',
+            mime_type='text/plain',
+            size=5,
+            sha256='ref',
+        )
+        asset.file.save('referenced.txt', ContentFile(b'hello'), save=True)
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        response = client.post('/api/ui-automation/page-steps-detailed/', {
+            'page_step': self.page_step.id,
+            'step_type': 0,
+            'element': self.element.id,
+            'step_sort': 4,
+            'ope_key': 'upload',
+            'ope_value': {'file_id': asset.id, 'file_name': 'referenced.txt', 'value': f'file_id:{asset.id}'},
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(FileReference.objects.filter(
+            file=asset,
+            project=self.project,
+            ref_type=FileReference.REF_UI_PAGE_STEPS,
+            ref_id=f"detail:{response.data['id']}",
+        ).exists())
+        asset.refresh_from_db()
+        self.assertEqual(asset.references.count(), 1)
+
+    def test_api_created_upload_step_deletes_file_when_auto_delete_enabled(self):
+        from file_management.models import FileManagementSetting
+        FileManagementSetting.objects.update_or_create(
+            project=self.project,
+            defaults={'auto_delete_on_unbind': True},
+        )
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='delete-api-created.txt',
+            mime_type='text/plain',
+            size=5,
+            sha256='apidel',
+        )
+        asset.file.save('delete-api-created.txt', ContentFile(b'hello'), save=True)
+        storage = asset.file.storage
+        storage_name = asset.file.name
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+        create_response = client.post('/api/ui-automation/page-steps-detailed/', {
+            'page_step': self.page_step.id,
+            'step_type': 0,
+            'element': self.element.id,
+            'step_sort': 5,
+            'ope_key': 'upload',
+            'ope_value': {'file_id': asset.id, 'file_name': 'delete-api-created.txt', 'value': f'file_id:{asset.id}'},
+        }, format='json')
+        self.assertEqual(create_response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(asset.references.count(), 1)
+
+        delete_response = client.delete(f"/api/ui-automation/page-steps-detailed/{create_response.data['id']}/")
+        self.assertIn(delete_response.status_code, (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT))
+        self.assertFalse(FileAsset.objects.filter(id=asset.id).exists())
+        self.assertFalse(storage.exists(storage_name))
 
 
 class UiModuleSortingTests(TestCase):

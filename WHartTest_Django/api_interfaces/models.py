@@ -104,6 +104,12 @@ class ApiInterface(models.Model):
         verbose_name='Extract Metadata',
         help_text='Metadata for extract variable rules',
     )
+    file_ids = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='附件 file_id 列表',
+        help_text='统一文件管理中的附件ID列表',
+    )
 
     # Relationships
     project = models.ForeignKey(

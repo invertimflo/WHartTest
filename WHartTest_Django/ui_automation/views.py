@@ -8,12 +8,14 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models.deletion import ProtectedError
 from django.db import transaction
+from file_management.services import maybe_cleanup_unreferenced_files, sync_file_references
 
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
     UiBatchExecutionRecord
 )
+from file_management.models import FileReference
 from .serializers import (
     UiModuleSerializer, UiPageSerializer, UiPageDetailSerializer,
     UiElementSerializer, UiPageStepsSerializer, UiPageStepsListSerializer, UiPageStepsDetailSerializer,
@@ -22,6 +24,60 @@ from .serializers import (
     UiPublicDataSerializer, UiEnvironmentConfigSerializer, UiTestCaseExecuteSerializer,
     UiPageStepsExecuteSerializer, UiBatchExecutionRecordSerializer, UiBatchExecutionRecordDetailSerializer
 )
+
+
+
+def _ui_step_detail_ref_id(step_or_id):
+    step_id = getattr(step_or_id, 'id', step_or_id)
+    return f'detail:{step_id}'
+
+
+def _extract_upload_file_id_from_step(step):
+    if not step or step.ope_key != 'upload' or not isinstance(step.ope_value, dict):
+        return None
+    file_id = step.ope_value.get('file_id')
+    if file_id in (None, ''):
+        value = step.ope_value.get('value')
+        if isinstance(value, str) and value.startswith('file_id:'):
+            file_id = value.split(':', 1)[1]
+    try:
+        return int(file_id) if file_id not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+
+
+
+def _sync_upload_step_file_reference(step, user=None):
+    if not step or not step.id:
+        return []
+    project = step.page_step.project if step.page_step_id and step.page_step else None
+    if not project:
+        return []
+    file_id = _extract_upload_file_id_from_step(step)
+    file_ids = [file_id] if file_id else []
+    return sync_file_references(
+        file_ids,
+        project,
+        FileReference.REF_UI_PAGE_STEPS,
+        _ui_step_detail_ref_id(step),
+        user,
+    )
+
+
+def _remove_upload_step_file_reference(step, user=None):
+    if not step or not step.id:
+        return []
+    project = step.page_step.project if step.page_step_id and step.page_step else None
+    if not project:
+        return []
+    old_file_ids = list(FileReference.objects.filter(
+        project=project,
+        ref_type=FileReference.REF_UI_PAGE_STEPS,
+        ref_id=_ui_step_detail_ref_id(step),
+    ).values_list('file_id', flat=True))
+    sync_file_references([], project, FileReference.REF_UI_PAGE_STEPS, _ui_step_detail_ref_id(step), user)
+    return old_file_ids
 
 
 class UiModuleViewSet(viewsets.ModelViewSet):
@@ -299,12 +355,27 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
 
 class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
     """步骤详情管理视图"""
-    queryset = UiPageStepsDetailed.objects.select_related('page_step', 'element')
+    queryset = UiPageStepsDetailed.objects.select_related('page_step', 'page_step__project', 'element')
     serializer_class = UiPageStepsDetailedSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['page_step', 'step_type']
     ordering_fields = ['step_sort', 'created_at']
     ordering = ['page_step', 'step_sort']
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        _sync_upload_step_file_reference(instance, self.request.user)
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        _sync_upload_step_file_reference(instance, self.request.user)
+
+    def perform_destroy(self, instance):
+        project = instance.page_step.project if instance.page_step_id and instance.page_step else None
+        old_file_ids = _remove_upload_step_file_reference(instance, self.request.user)
+        instance.delete()
+        if old_file_ids and project:
+            maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
 
     @action(detail=False, methods=['post'])
     def batch_update(self, request):
@@ -313,8 +384,17 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         steps = request.data.get('steps', [])
         if not page_step_id:
             return Response({'error': 'page_step 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除旧步骤，创建新步骤
+        # 删除旧步骤，创建新步骤；同步清理旧上传文件
+        old_steps = list(UiPageStepsDetailed.objects.select_related('page_step', 'page_step__project').filter(page_step_id=page_step_id))
+        old_file_ids = []
+        project = None
+        for old_step in old_steps:
+            old_file_ids.extend(_remove_upload_step_file_reference(old_step, request.user))
+            if project is None and old_step.page_step_id and old_step.page_step:
+                project = old_step.page_step.project
         UiPageStepsDetailed.objects.filter(page_step_id=page_step_id).delete()
+        if old_file_ids and project:
+            maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
         for idx, step_data in enumerate(steps):
             step_data['page_step'] = page_step_id
             step_data['step_sort'] = idx
@@ -323,7 +403,8 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
                 step_data['element'] = step_data.pop('element_id')
             serializer = self.get_serializer(data=step_data)
             serializer.is_valid(raise_exception=True)
-            serializer.save()
+            instance = serializer.save()
+            _sync_upload_step_file_reference(instance, request.user)
         return Response({'message': '批量更新成功'})
 
 
@@ -467,7 +548,8 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
             step_data['case_sort'] = idx
             serializer = self.get_serializer(data=step_data)
             serializer.is_valid(raise_exception=True)
-            serializer.save()
+            instance = serializer.save()
+            _sync_upload_step_file_reference(instance, request.user)
         return Response({'message': '批量更新成功'})
 
 

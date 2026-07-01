@@ -235,3 +235,6 @@ export const actuatorApi = {
 
   status: () => request.get<ActuatorStatus>(`${BASE_URL}/actuators/status/`),
 }
+
+
+export { fileService as uiFileService } from '@/features/file-management/services/fileService'

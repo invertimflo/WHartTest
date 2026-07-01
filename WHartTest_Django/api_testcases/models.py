@@ -84,6 +84,7 @@ class ApiTestCase(models.Model):
     description = models.TextField(blank=True)
     priority = models.CharField(max_length=2, choices=PRIORITY_CHOICES, default='P2')
     config = models.JSONField(default=dict)
+    file_ids = models.JSONField(default=list, blank=True)
     project = models.ForeignKey(
         'projects.Project',
         on_delete=models.CASCADE,
@@ -126,6 +127,7 @@ class ApiTestCaseStep(models.Model):
     order = models.IntegerField()
     interface_data = models.JSONField()
     config = models.JSONField(default=dict, blank=True)
+    file_ids = models.JSONField(default=list, blank=True)
     testcase = models.ForeignKey(
         ApiTestCase,
         on_delete=models.CASCADE,

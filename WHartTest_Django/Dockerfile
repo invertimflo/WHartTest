@@ -115,6 +115,7 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH="/app" \
     FASTEMBED_CACHE_PATH=/root/.cache/fastembed \
+    USER_AGENT="WHartTest/2.6.0-ce" \
     HF_ENDPOINT=${HF_ENDPOINT} \
     PLAYWRIGHT_DOWNLOAD_HOST=${PLAYWRIGHT_DOWNLOAD_HOST}
 

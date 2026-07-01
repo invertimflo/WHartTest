@@ -270,7 +270,8 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
         setup_hooks: setupHooks,
         teardown_hooks: teardownHooks,
         extract: extractRules,
-        validators: assertRules
+        validators: assertRules,
+        file_ids: collectFileIdsFromBody(body)
       }
 
       console.log('发送调试请求:', debugData);
@@ -330,6 +331,18 @@ const normalizeModuleValue = (moduleValue: unknown) => {
 
 // 获取当前环境ID
 const currentEnvironmentId = computed(() => environmentStore.currentEnvironmentId)
+
+const collectFileIdsFromBody = (body: any): number[] => {
+  const ids = new Set<number>()
+  const content = body?.content
+  if (Array.isArray(content)) {
+    content.forEach((item: any) => {
+      const fileId = Number(item?.file_id || (typeof item?.value === 'string' && item.value.startsWith('file_id:') ? item.value.split(':')[1] : 0))
+      if (Number.isFinite(fileId) && fileId > 0) ids.add(fileId)
+    })
+  }
+  return Array.from(ids)
+}
 
 // 处理保存用例
 const handleSave = async (requestData: { method: string, url: string, name: string, module?: number | string | null }) => {
@@ -399,7 +412,8 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
       teardown_hooks: processHooks(teardownHooks),
       variables: {}, // TODO: 待实现变量配置
       validators: assertRules,
-      extract: extractRules
+      extract: extractRules,
+      file_ids: collectFileIdsFromBody(body)
     }
 
     let savedInterface: ApiInterface | undefined
@@ -775,3 +789,4 @@ watch(() => props.autoDebug, async (newValue) => {
   user-select: none;
 }
 </style>
+

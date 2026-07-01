@@ -250,6 +250,7 @@ class ApiInterfaceViewSet(BaseModelViewSet):
             'variables': request.data.get('variables', {}),
             'validators': request.data.get('validators', []),
             'extract': request.data.get('extract', {}),
+            'file_ids': request.data.get('file_ids', []),
         }
 
         if interface_type == 'http':

@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from .models import ApiInterface, ApiInterfaceResult
 from .payloads import normalize_key_value_pairs, normalize_request_body
+from file_management.services import validate_file_ids, sync_file_references
+from file_management.models import FileReference
 
 
 class ApiInterfaceModuleInfoSerializer(serializers.Serializer):
@@ -66,6 +68,16 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"module": "Module must belong to the same project."}
             )
+
+        if 'file_ids' in attrs:
+            if project_id is None:
+                raise serializers.ValidationError({"file_ids": "project is required to validate file_ids."})
+            from projects.models import Project
+            try:
+                project_obj = Project.objects.get(id=project_id)
+            except Project.DoesNotExist as exc:
+                raise serializers.ValidationError({"project": "Project does not exist."}) from exc
+            validate_file_ids(attrs.get('file_ids'), project_obj, self.context.get('request').user if self.context.get('request') else None)
 
         if 'headers' in attrs:
             try:
@@ -149,3 +161,22 @@ class ApiInterfaceResultSerializer(serializers.ModelSerializer):
         model = ApiInterfaceResult
         fields = '__all__'
         read_only_fields = ['executed_by', 'executed_at']
+
+
+# 附件引用关系维护
+_original_api_interface_create = ApiInterfaceSerializer.create if hasattr(ApiInterfaceSerializer, 'create') else None
+_original_api_interface_update = ApiInterfaceSerializer.update if hasattr(ApiInterfaceSerializer, 'update') else None
+
+def _api_interface_serializer_create(self, validated_data):
+    instance = super(ApiInterfaceSerializer, self).create(validated_data)
+    sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_INTERFACE, instance.id, self.context.get('request').user if self.context.get('request') else None)
+    return instance
+
+def _api_interface_serializer_update(self, instance, validated_data):
+    instance = super(ApiInterfaceSerializer, self).update(instance, validated_data)
+    if 'file_ids' in validated_data:
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_INTERFACE, instance.id, self.context.get('request').user if self.context.get('request') else None)
+    return instance
+
+ApiInterfaceSerializer.create = _api_interface_serializer_create
+ApiInterfaceSerializer.update = _api_interface_serializer_update

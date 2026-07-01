@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from django.db import transaction, models
+from file_management.services import validate_file_ids, sync_file_references
+from file_management.models import FileReference
 from .models import (
     ApiTestCase, ApiTestCaseStep, ApiTestReport, ApiTestReportDetail,
     ApiTestCaseTag, ApiTestCaseGroup
@@ -32,6 +34,18 @@ class ApiTestCaseGroupSerializer(serializers.ModelSerializer):
         return []
 
 
+def validate_file_ids_for_project(file_ids, project_pk, user=None):
+    if file_ids in (None, ''):
+        return []
+    from projects.models import Project
+    try:
+        project = Project.objects.get(id=project_pk)
+    except Project.DoesNotExist as exc:
+        raise serializers.ValidationError({'project': 'Project does not exist.'}) from exc
+    validate_file_ids(file_ids, project, user)
+    return file_ids
+
+
 class ApiTestCaseStepSerializer(serializers.ModelSerializer):
     interface_id = serializers.IntegerField(write_only=True, required=False)
     interface_info = serializers.SerializerMethodField(read_only=True)
@@ -41,7 +55,7 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
         model = ApiTestCaseStep
         fields = [
             'id', 'name', 'order', 'interface_id',
-            'interface_info', 'interface_data', 'config',
+            'interface_info', 'interface_data', 'config', 'file_ids',
             'sync_fields', 'last_sync_time'
         ]
         read_only_fields = ['last_sync_time']
@@ -75,7 +89,8 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
             'variables': {},
             'validators': [],
             'setup_hooks': [],
-            'teardown_hooks': []
+            'teardown_hooks': [],
+            'file_ids': interface.file_ids or []
         }
 
     def _create_sync_config(self, step, interface):
@@ -117,6 +132,14 @@ class ApiTestCaseStepSerializer(serializers.ModelSerializer):
         """Get project_pk from serializer context (passed by DRF ViewSet)."""
         view = self.context.get('view')
         return view.kwargs.get('project_pk') if view else None
+
+    def validate(self, attrs):
+        project_pk = self._get_project_pk()
+        if 'file_ids' in attrs and project_pk:
+            attrs['file_ids'] = validate_file_ids_for_project(attrs.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        if 'interface_data' in attrs and isinstance(attrs.get('interface_data'), dict) and 'file_ids' in attrs['interface_data'] and project_pk:
+            validate_file_ids_for_project(attrs['interface_data'].get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        return attrs
 
     def create(self, validated_data):
         from api_interfaces.models import ApiInterface
@@ -206,7 +229,7 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         model = ApiTestCase
         fields = [
             'id', 'name', 'description', 'priority',
-            'config', 'project', 'group',
+            'config', 'file_ids', 'project', 'group',
             'tags', 'tags_info', 'group_info',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
             'steps', 'steps_info', 'related_interfaces'
@@ -217,6 +240,18 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
         """Get project_pk from serializer context (passed by DRF ViewSet)."""
         view = self.context.get('view')
         return view.kwargs.get('project_pk') if view else None
+
+    def validate(self, attrs):
+        project_pk = self._get_project_pk()
+        if 'file_ids' in attrs and project_pk:
+            attrs['file_ids'] = validate_file_ids_for_project(attrs.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        for step_data in attrs.get('steps_info') or []:
+            if 'file_ids' in step_data and project_pk:
+                validate_file_ids_for_project(step_data.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+            interface_data = step_data.get('interface_data')
+            if isinstance(interface_data, dict) and 'file_ids' in interface_data and project_pk:
+                validate_file_ids_for_project(interface_data.get('file_ids'), project_pk, self.context.get('request').user if self.context.get('request') else None)
+        return attrs
 
     def _build_interface_data(self, interface):
         return {
@@ -229,7 +264,8 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             'variables': {},
             'validators': [],
             'setup_hooks': [],
-            'teardown_hooks': []
+            'teardown_hooks': [],
+            'file_ids': interface.file_ids or []
         }
 
     def _create_sync_config(self, step, interface):
@@ -286,17 +322,20 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
                 'variables': user_interface_data.get('variables', {}),
                 'validators': user_interface_data.get('validators', []),
                 'setup_hooks': user_interface_data.get('setup_hooks', []),
-                'teardown_hooks': user_interface_data.get('teardown_hooks', [])
+                'teardown_hooks': user_interface_data.get('teardown_hooks', []),
+                'file_ids': user_interface_data.get('file_ids', interface.file_ids or [])
             }
         else:
             interface_data = self._build_interface_data(interface)
 
         step_data.pop('order', None)
+        file_ids = step_data.pop('file_ids', interface_data.get('file_ids', []))
         step = ApiTestCaseStep.objects.create(
             testcase=instance,
             order=order,
             origin_interface=interface,
             interface_data=interface_data,
+            file_ids=file_ids,
             **step_data
         )
         self._create_sync_config(step, interface)
@@ -335,6 +374,10 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             step.sync_fields = update_data['sync_fields']
         if 'config' in update_data:
             step.config = update_data['config']
+        if 'file_ids' in update_data:
+            step.file_ids = update_data['file_ids']
+        if isinstance(step.interface_data, dict) and step.file_ids:
+            step.interface_data['file_ids'] = step.file_ids
 
         step.save()
         return step
@@ -357,6 +400,7 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
             )
 
         instance.refresh_from_db()
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_TESTCASE, instance.id, self.context.get('request').user if self.context.get('request') else None)
         return instance
 
     def update(self, instance, validated_data):
@@ -426,6 +470,7 @@ class ApiTestCaseSerializer(serializers.ModelSerializer):
 
             instance.refresh_from_db()
 
+        sync_file_references(instance.file_ids or [], instance.project, FileReference.REF_API_TESTCASE, instance.id, self.context.get('request').user if self.context.get('request') else None)
         return instance
 
 

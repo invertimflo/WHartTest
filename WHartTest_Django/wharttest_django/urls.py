@@ -72,6 +72,7 @@ from api_testcases.views import (
     ApiTestReportViewSet,
 )
 from api_testtasks.views import ApiTestTaskSuiteViewSet, ApiTestTaskExecutionViewSet
+from file_management.views import FileAssetViewSet
 from api_sync.views import (
     ApiSyncConfigViewSet,
     ApiSyncHistoryViewSet,
@@ -132,6 +133,7 @@ projects_router.register(r'api-task-executions', ApiTestTaskExecutionViewSet, ba
 projects_router.register(r'api-sync-configs', ApiSyncConfigViewSet, basename='project-api-sync-configs')
 projects_router.register(r'api-sync-histories', ApiSyncHistoryViewSet, basename='project-api-sync-histories')
 projects_router.register(r'api-global-sync-configs', ApiGlobalSyncConfigViewSet, basename='project-api-global-sync-configs')
+projects_router.register(r'files', FileAssetViewSet, basename='project-files')
 
 # 定义根 URL 路由表。
 urlpatterns = [

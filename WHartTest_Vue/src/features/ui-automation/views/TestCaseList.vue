@@ -185,7 +185,15 @@
         <a-form-item field="description" :label="pageText.caseDescription">
           <a-textarea v-model="formData.description" :placeholder="pageText.enterCaseDescription" :auto-size="{ minRows: 2, maxRows: 4 }" />
         </a-form-item>
-      </a-form>
+      
+          <a-form-item label="附件">
+            <FileAttachmentPicker
+              v-model="formData.file_ids"
+              :project-id="projectStore.currentProjectId || 0"
+              button-text="上传附件"
+            />
+          </a-form-item>
+</a-form>
     </a-modal>
 
     <!-- 步骤管理抽屉 -->
@@ -201,6 +209,7 @@
 </template>
 
 <script setup lang="ts">
+import FileAttachmentPicker from '@/features/file-management/components/FileAttachmentPicker.vue'
 import { ref, reactive, computed, onMounted, watch, onUnmounted } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconOrderedList, IconPlayArrow, IconThunderbolt } from '@arco-design/web-vue/es/icon'
@@ -382,6 +391,7 @@ const filters = reactive({
 const pagination = reactive({ current: 1, pageSize: 10, total: 0, showTotal: true, showPageSize: true })
 
 const formData = reactive<UiTestCaseForm>({
+  file_ids: [],
   project: 0,
   module: undefined as unknown as number,
   name: '',
