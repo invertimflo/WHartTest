@@ -76,9 +76,12 @@ class TestCaseViewSet(viewsets.ModelViewSet):
     filter_backends = [
         DjangoFilterBackend,
         filters.SearchFilter,
-    ]  # 添加 DjangoFilterBackend
+        filters.OrderingFilter,
+    ]  # 添加 DjangoFilterBackend、搜索与排序
     filterset_class = TestCaseFilter  # 使用自定义的 FilterSet
     search_fields = ["name", "precondition"]
+    ordering_fields = ["id", "created_at", "updated_at"]
+    ordering = ["-created_at"]
 
     def _should_include_steps(self):
         value = self.request.query_params.get("include_steps")

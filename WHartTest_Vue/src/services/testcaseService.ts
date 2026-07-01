@@ -114,6 +114,7 @@ export interface PaginationParams {
   test_type?: string; // 单个测试类型筛选
   test_type_in?: string[]; // 多个测试类型筛选
   include_steps?: boolean; // 是否返回步骤详情，默认列表不返回；思维导图需要传 true
+  ordering?: string; // 排序字段，支持 id/-id/created_at/-created_at/updated_at/-updated_at
 }
 
 // 测试用例列表响应接口
@@ -194,6 +195,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
         // 多个测试类型筛选，用逗号连接
         test_type_in: params.test_type_in?.join(','),
         include_steps: params.include_steps ? 'true' : undefined,
+        ordering: params.ordering,
       } : undefined,
       headers: {
         'Authorization': `Bearer ${accessToken}`,
