@@ -237,6 +237,7 @@ COPY api_sync/ /app/api_sync/
 COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
 COPY httprunner/ /app/httprunner/
+COPY file_management/ /app/file_management/
 COPY knowledge/ /app/knowledge/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/
