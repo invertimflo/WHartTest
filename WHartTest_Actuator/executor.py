@@ -502,6 +502,32 @@ class PlaywrightExecutor:
                     conn.close()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _is_non_file_input_upload_error(error: Exception) -> bool:
+        message = str(error)
+        return "not an HTMLInputElement" in message
+
+    async def _upload_file(self, page: Page, locator: Any, file_path: Any, step: StepConfig) -> None:
+        if not file_path or not str(file_path).strip():
+            raise ValueError("上传文件路径为空，请选择文件管理中的文件或填写执行器可访问的文件路径")
+
+        try:
+            await locator.set_input_files(file_path)
+            logger.info(f"步骤 {step.step_id}: 已通过 file input 设置上传文件")
+            return
+        except Exception as exc:
+            if not self._is_non_file_input_upload_error(exc):
+                raise
+
+            logger.info(f"步骤 {step.step_id}: 当前定位器不是 file input，改用文件选择器事件上传")
+
+        async with page.expect_file_chooser() as file_chooser_info:
+            await locator.click()
+
+        file_chooser = await file_chooser_info.value
+        await file_chooser.set_files(file_path)
+        logger.info(f"步骤 {step.step_id}: 已通过 file chooser 设置上传文件")
     
     async def _execute_step(
         self,
@@ -673,9 +699,15 @@ class PlaywrightExecutor:
             'hover': lambda: locator.hover(),
             'focus': lambda: locator.focus(),
             'press': lambda: locator.press(step.input_value),
-            'upload': lambda: locator.set_input_files(step.input_value),
         }
         
+        if operation == 'upload':
+            action_start = time.time()
+            await self._upload_file(page, locator, step.input_value, step)
+            action_time = time.time() - action_start
+            logger.debug(f"步骤 {step.step_id}: {operation} 操作耗时 {action_time:.2f}s (总计 {time.time() - op_start:.2f}s)")
+            return True, f"元素操作 {operation} 执行成功", None
+
         if operation in element_operations:
             action_start = time.time()
             await element_operations[operation]()

@@ -75,6 +75,20 @@ class ApiInterfaceModelTest(TestCase):
         )
         self.assertEqual(str(interface), 'Test Project-My API')
 
+    def test_get_interface_data_includes_file_ids(self):
+        """运行接口时应带出文件附件 ID。"""
+        interface = ApiInterface.objects.create(
+            name='Upload API',
+            type='http',
+            method='POST',
+            url='/api/upload',
+            file_ids=[8],
+            project=self.project,
+            created_by=self.user,
+        )
+
+        self.assertEqual(interface.get_interface_data()['file_ids'], [8])
+
     def test_unique_together_name_project(self):
         """测试同一项目下接口名唯一约束"""
         ApiInterface.objects.create(
@@ -1303,6 +1317,66 @@ class ApiInterfaceRunnerTest(TestCase):
         self.assertEqual(request.params, {'page': '1'})
         self.assertEqual(request.data, {'username': 'tester', 'password': 'secret'})
         self.assertIsNone(request.req_json)
+
+    @patch('api_interfaces.runner._resolve_runtime_files')
+    @patch('api_interfaces.runner.load_custom_functions', return_value={})
+    @patch('httprunner.HttpRunner.test_start')
+    def test_runner_form_data_file_field_uses_upload(
+        self,
+        mock_test_start,
+        mock_load_funcs,
+        mock_resolve_files,
+    ):
+        """form-data 文件字段应转成 multipart upload，而不是普通 data。"""
+        from .runner import InterfaceRunner
+
+        mock_resolve_files.return_value = [{'id': 8, 'path': '/tmp/upload.txt'}]
+        interface_data = {
+            'name': 'Upload File',
+            'type': 'http',
+            'method': 'POST',
+            'url': 'http://example.com/api/upload',
+            'headers': [
+                {'key': 'Content-Type', 'value': 'multipart/form-data', 'description': '', 'enabled': True},
+                {'key': 'Authorization', 'value': 'Bearer token', 'description': '', 'enabled': True},
+            ],
+            'params': {},
+            'body': {
+                'type': 'form-data',
+                'content': [
+                    {
+                        'key': 'files',
+                        'value': 'file_id:8',
+                        'value_type': 'file',
+                        'file_id': 8,
+                        'description': '',
+                        'enabled': True,
+                    },
+                    {
+                        'key': 'folder',
+                        'value': 'docs',
+                        'value_type': 'text',
+                        'description': '',
+                        'enabled': True,
+                    },
+                ],
+            },
+            'variables': {},
+            'validators': [],
+            'extract': {},
+            'setup_hooks': [],
+            'teardown_hooks': [],
+            'project_id': self.project.pk,
+        }
+
+        runner = InterfaceRunner(interface_data)
+        request = runner.teststeps[0].request
+
+        mock_resolve_files.assert_called_once_with(self.project.pk, [8])
+        self.assertEqual(request.upload, {'files': '/tmp/upload.txt', 'folder': 'docs'})
+        self.assertIsNone(request.data)
+        self.assertEqual(request.headers['Authorization'], 'Bearer token')
+        self.assertFalse(any(key.lower() == 'content-type' for key in request.headers))
 
     @patch('api_interfaces.runner.load_custom_functions')
     @patch('httprunner.HttpRunner.test_start')

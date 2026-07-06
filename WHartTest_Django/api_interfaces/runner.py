@@ -16,6 +16,11 @@ from .payloads import (
     normalize_request_body,
     prepare_request_body_for_runner,
 )
+from .runner_uploads import (
+    apply_upload_files_to_step,
+    collect_file_ids_from_body,
+    merge_file_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,40 +94,6 @@ def _resolve_runtime_files(project_id, file_ids):
         raise ValueError(f'附件校验失败: {exc}') from exc
 
 
-def _apply_upload_files_to_step(step_obj, normalized_body, runtime_files):
-    if not runtime_files:
-        return step_obj
-    content = normalized_body.get('content') if isinstance(normalized_body, dict) else None
-    upload_mapping = {}
-    if isinstance(content, list):
-        for item in content:
-            if not isinstance(item, dict) or not item.get('enabled', True):
-                continue
-            value = item.get('value')
-            key = item.get('key')
-            file_id = item.get('file_id')
-            if key and item.get('value_type') == 'file' and file_id not in (None, ''):
-                try:
-                    upload_mapping[str(key)] = int(file_id)
-                except (TypeError, ValueError):
-                    pass
-            elif key and isinstance(value, str) and value.startswith('file_id:'):
-                try:
-                    upload_mapping[str(key)] = int(value.split(':', 1)[1])
-                except ValueError:
-                    pass
-    if not upload_mapping and len(runtime_files) == 1 and normalized_body.get('type') in {'form-data', 'binary'}:
-        upload_mapping['file'] = runtime_files[0]['id']
-    files_by_id = {item['id']: item for item in runtime_files}
-    upload_info = {}
-    for field, file_id in upload_mapping.items():
-        info = files_by_id.get(file_id)
-        if info and info.get('path'):
-            upload_info[field] = info['path']
-    if upload_info:
-        step_obj = step_obj.upload(**upload_info)
-    return step_obj
-
 class InterfaceRunner(HttpRunner):
     """Interface runner based on httprunner."""
 
@@ -142,7 +113,12 @@ class InterfaceRunner(HttpRunner):
             self.verify = self.interface_data.get('verify', None)
             self.variables = self.interface_data.get('variables', {})
             project_id = self.interface_data.get('project_id')
-            self.runtime_files = _resolve_runtime_files(project_id, self.interface_data.get('file_ids') or [])
+            file_ids = merge_file_ids(
+                self.interface_data.get('file_ids'),
+                collect_file_ids_from_body(self.interface_data.get('body')),
+            )
+            self.interface_data['file_ids'] = file_ids
+            self.runtime_files = _resolve_runtime_files(project_id, file_ids)
             if self.runtime_files:
                 self.variables = self.variables or {}
                 self.variables['file_ids'] = [item['id'] for item in self.runtime_files]
@@ -318,9 +294,16 @@ class InterfaceRunner(HttpRunner):
                     'prepared_summary': summarize_for_log(body),
                 })
                 self.prepared_request_snapshot['body'] = copy.deepcopy(body)
-                step_obj = _apply_upload_files_to_step(step_obj, normalized_body, self.runtime_files)
+                step_obj, upload_applied = apply_upload_files_to_step(
+                    step_obj,
+                    normalized_body,
+                    self.runtime_files,
+                )
+                self.prepared_request_snapshot['headers'] = copy.deepcopy(
+                    step_obj.struct().request.headers,
+                )
                 if normalized_body['type'] in {'form-data', 'x-www-form-urlencoded', 'binary'}:
-                    if not getattr(step_obj.struct().request, 'upload', None):
+                    if not upload_applied:
                         step_obj = step_obj.with_data(body)
                 else:
                     step_obj = step_obj.with_json(body)
@@ -742,6 +725,7 @@ class InterfaceRunner(HttpRunner):
         """Get global request headers for the project."""
         global_headers = {}
         try:
+            project_id = self.interface_data.get('project_id')
             if project_id:
                 from api_environments.models import ApiGlobalRequestHeader as GlobalRequestHeader
 

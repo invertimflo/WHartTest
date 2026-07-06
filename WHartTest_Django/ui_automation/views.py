@@ -507,27 +507,47 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         steps = request.data.get('steps', [])
         if not page_step_id:
             return Response({'error': 'page_step 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除旧步骤，创建新步骤；同步清理旧上传文件
-        old_steps = list(UiPageStepsDetailed.objects.select_related('page_step', 'page_step__project').filter(page_step_id=page_step_id))
-        old_file_ids = []
-        project = None
-        for old_step in old_steps:
-            old_file_ids.extend(_remove_upload_step_file_reference(old_step, request.user))
-            if project is None and old_step.page_step_id and old_step.page_step:
-                project = old_step.page_step.project
-        UiPageStepsDetailed.objects.filter(page_step_id=page_step_id).delete()
-        if old_file_ids and project:
-            maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
-        for idx, step_data in enumerate(steps):
-            step_data['page_step'] = page_step_id
-            step_data['step_sort'] = idx
-            # 兼容 element_id 和 element 两种参数名
-            if 'element_id' in step_data and 'element' not in step_data:
-                step_data['element'] = step_data.pop('element_id')
-            serializer = self.get_serializer(data=step_data)
-            serializer.is_valid(raise_exception=True)
-            instance = serializer.save()
-            _sync_upload_step_file_reference(instance, request.user)
+        with transaction.atomic():
+            qs = self.get_queryset().select_related('page_step', 'page_step__project').filter(page_step_id=page_step_id)
+            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            old_file_ids = []
+            project = None
+
+            # 仅删除被移除的步骤详情，对已提交的进行原地更新，
+            # 避免重建改变主键 id 导致引用该步骤详情的用例 case_data 全部失效；
+            # 同时同步维护上传文件引用，避免删除/更新步骤后遗留无效引用。
+            removed_steps = list(qs.exclude(id__in=submitted_ids)) if submitted_ids else list(qs)
+            for old_step in removed_steps:
+                old_file_ids.extend(_remove_upload_step_file_reference(old_step, request.user))
+                if project is None and old_step.page_step_id and old_step.page_step:
+                    project = old_step.page_step.project
+            if submitted_ids:
+                qs.exclude(id__in=submitted_ids).delete()
+            else:
+                qs.delete()
+
+            for idx, step_data in enumerate(steps):
+                step_data['page_step'] = page_step_id
+                step_data['step_sort'] = idx
+                # 兼容 element_id 和 element 两种参数名
+                if 'element_id' in step_data and 'element' not in step_data:
+                    step_data['element'] = step_data.pop('element_id')
+                sid = step_data.pop('id', None)
+                instance = qs.filter(id=sid).first() if sid else None
+                if instance:
+                    if project is None and instance.page_step_id and instance.page_step:
+                        project = instance.page_step.project
+                    serializer = self.get_serializer(instance, data=step_data, partial=True)
+                else:
+                    serializer = self.get_serializer(data=step_data)
+                serializer.is_valid(raise_exception=True)
+                instance = serializer.save()
+                _sync_upload_step_file_reference(instance, request.user)
+                if project is None and instance.page_step_id and instance.page_step:
+                    project = instance.page_step.project
+
+            if old_file_ids and project:
+                maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
         return Response({'message': '批量更新成功'})
 
 
@@ -726,15 +746,26 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
         steps = request.data.get('steps', [])
         if not test_case_id:
             return Response({'error': 'test_case 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        # 删除旧步骤，创建新步骤
-        UiCaseStepsDetailed.objects.filter(test_case_id=test_case_id).delete()
-        for idx, step_data in enumerate(steps):
-            step_data['test_case'] = test_case_id
-            step_data['case_sort'] = idx
-            serializer = self.get_serializer(data=step_data)
-            serializer.is_valid(raise_exception=True)
-            instance = serializer.save()
-            _sync_upload_step_file_reference(instance, request.user)
+        with transaction.atomic():
+            qs = self.get_queryset().filter(test_case_id=test_case_id)
+            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            # 仅删除被移除的步骤，对已提交的进行原地更新，
+            # 避免重建丢失 case_data 等未提交字段（数据填充被清空）
+            if submitted_ids:
+                qs.exclude(id__in=submitted_ids).delete()
+            else:
+                qs.delete()
+            for idx, step_data in enumerate(steps):
+                step_data['test_case'] = test_case_id
+                step_data['case_sort'] = idx
+                sid = step_data.pop('id', None)
+                instance = qs.filter(id=sid).first() if sid else None
+                if instance:
+                    serializer = self.get_serializer(instance, data=step_data, partial=True)
+                else:
+                    serializer = self.get_serializer(data=step_data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
         return Response({'message': '批量更新成功'})
 
 

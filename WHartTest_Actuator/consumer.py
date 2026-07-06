@@ -17,6 +17,7 @@ from executor import (
     PlaywrightExecutor, StepConfig, PageStepConfig, TestCaseConfig
 )
 from data_processor import reset_data_processor, DataProcessor
+from runtime_env import resolve_runtime_file_path
 
 logger = logging.getLogger('actuator')
 
@@ -640,6 +641,7 @@ class TaskConsumer:
         for detail in data.get('step_details', []):
             step_type = detail.get('step_type', 0)
             detail_id = str(detail.get('id', ''))
+            operation_type = detail.get('ope_key') or ''
             
             # 从 ope_value 中提取输入值
             ope_value = detail.get('ope_value', {})
@@ -735,6 +737,22 @@ class TaskConsumer:
                     locator_value_3 = str(locator_value_3)
             else:
                 logger.warning(f"data_processor 为 None，跳过变量替换")
+            if operation_type.lower() == 'upload':
+                original_input = input_value
+                input_value = resolve_runtime_file_path(input_value)
+                if original_input != input_value:
+                    logger.info(f"上传文件路径映射: '{original_input}' -> '{input_value}'")
+
+            # iframe 定位器也可能包含变量
+            is_iframe = detail.get('is_iframe', False)
+            iframe_locator = detail.get('iframe_locator', '') or ''
+            if data_processor and iframe_locator:
+                original_iframe = iframe_locator
+                iframe_locator = data_processor.replace(iframe_locator)
+                if original_iframe != iframe_locator:
+                    logger.info(f"变量替换 (iframe 定位器): '{original_iframe}' -> '{iframe_locator}'")
+                if not isinstance(iframe_locator, str):
+                    iframe_locator = str(iframe_locator)
 
             def _parse_index(value):
                 if value is None or value == '':
@@ -746,15 +764,15 @@ class TaskConsumer:
             
             steps.append(StepConfig(
                 step_id=detail.get('id', 0),
-                operation_type=detail.get('ope_key') or '',  # 操作类型如 click, type
+                operation_type=operation_type,  # 操作类型如 click, type
                 locator_type=detail.get('locator_type') or 'xpath',  # 定位方式
                 locator_value=locator_value or '',  # 定位表达式
                 step_type=step_type,
                 input_value=input_value,  # 输入值
                 description=detail.get('description') or detail.get('element_name') or ('SQL操作' if step_type == 2 else ''),
                 wait_time=detail.get('wait_time', 0),
-                is_iframe=detail.get('is_iframe', False),
-                iframe_locator=detail.get('iframe_locator') or '',
+                is_iframe=is_iframe,
+                iframe_locator=iframe_locator,
                 locator_index=detail.get('locator_index'),
                 locator_type_2=detail.get('locator_type_2'),
                 locator_value_2=locator_value_2 or None,

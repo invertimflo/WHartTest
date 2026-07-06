@@ -176,6 +176,7 @@ class ApiInterface(models.Model):
             'validators': self.validators,
             'extract': self.extract,
             'extract_meta': self.extract_meta,
+            'file_ids': self.file_ids or [],
         }
 
         if self.type == self.TYPE_HTTP:

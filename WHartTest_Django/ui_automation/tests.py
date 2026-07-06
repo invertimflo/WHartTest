@@ -6,14 +6,16 @@ from rest_framework.test import APIClient
 
 from projects.models import Project, ProjectMember
 from ui_automation.models import (
+    UiCaseStepsDetailed,
     UiElement,
     UiModule,
     UiPage,
     UiPageSteps,
     UiPageStepsDetailed,
+    UiTestCase,
 )
 from ui_automation.serializers import UiPageStepsExecuteSerializer
-from file_management.models import FileAsset, FileReference
+from file_management.models import FileAsset, FileManagementSetting, FileReference
 
 
 class UiPageStepsExecuteDataTests(TestCase):
@@ -360,3 +362,205 @@ class UiModuleSortingTests(TestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('超过5级限制', response.data['error'])
+
+
+class UiStepBatchUpdatePreservesOverrideTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_superuser(username='batchuser', password='password', email='batch@example.com')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.project = Project.objects.create(name='Batch Project', description='Test Description', creator=self.user)
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        self.module = UiModule.objects.create(project=self.project, name='Root', creator=self.user, order=1)
+        self.page = UiPage.objects.create(project=self.project, module=self.module, name='Login', url='https://example.com', creator=self.user)
+        self.element = UiElement.objects.create(
+            page=self.page,
+            name='Username',
+            locator_type='css',
+            locator_value='#username',
+            creator=self.user,
+        )
+        self.page_step = UiPageSteps.objects.create(
+            project=self.project,
+            page=self.page,
+            module=self.module,
+            name='Fill login form',
+            creator=self.user,
+        )
+        self.other_page_step = UiPageSteps.objects.create(
+            project=self.project,
+            page=self.page,
+            module=self.module,
+            name='Submit login form',
+            creator=self.user,
+        )
+        self.detail_one = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            step_type=0,
+            element=self.element,
+            step_sort=0,
+            ope_key='fill',
+            ope_value={'text': 'default-one'},
+        )
+        self.detail_two = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            step_type=0,
+            element=self.element,
+            step_sort=1,
+            ope_key='type',
+            ope_value={'text': 'default-two'},
+        )
+        self.test_case = UiTestCase.objects.create(
+            project=self.project,
+            module=self.module,
+            name='Login case',
+            creator=self.user,
+        )
+        self.case_step = UiCaseStepsDetailed.objects.create(
+            test_case=self.test_case,
+            page_step=self.page_step,
+            case_sort=0,
+            case_data={
+                str(self.detail_one.id): {'text': 'override-one'},
+                str(self.detail_two.id): {'text': 'override-two'},
+            },
+        )
+        self.other_case_step = UiCaseStepsDetailed.objects.create(
+            test_case=self.test_case,
+            page_step=self.other_page_step,
+            case_sort=1,
+        )
+
+    def test_page_step_detail_reorder_keeps_detail_ids(self):
+        url = '/api/ui-automation/page-steps-detailed/batch_update/'
+        response = self.client.post(url, {
+            'page_step': self.page_step.id,
+            'steps': [
+                {
+                    'id': self.detail_two.id,
+                    'step_type': self.detail_two.step_type,
+                    'element': self.element.id,
+                    'ope_key': self.detail_two.ope_key,
+                    'ope_value': self.detail_two.ope_value,
+                },
+                {
+                    'id': self.detail_one.id,
+                    'step_type': self.detail_one.step_type,
+                    'element': self.element.id,
+                    'ope_key': self.detail_one.ope_key,
+                    'ope_value': self.detail_one.ope_value,
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(
+            list(UiPageStepsDetailed.objects.filter(page_step=self.page_step).order_by('step_sort').values_list('id', flat=True)),
+            [self.detail_two.id, self.detail_one.id],
+        )
+        self.detail_one.refresh_from_db()
+        self.detail_two.refresh_from_db()
+        self.assertEqual(self.detail_one.step_sort, 1)
+        self.assertEqual(self.detail_two.step_sort, 0)
+
+    def test_page_step_detail_reorder_keeps_upload_file_when_auto_delete_enabled(self):
+        FileManagementSetting.objects.update_or_create(
+            project=self.project,
+            defaults={'auto_delete_on_unbind': True},
+        )
+        asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            original_name='reorder-upload.txt',
+            mime_type='text/plain',
+            size=5,
+            sha256='reorder-upload',
+        )
+        asset.file.save('reorder-upload.txt', ContentFile(b'hello'), save=True)
+        storage = asset.file.storage
+        storage_name = asset.file.name
+        upload_detail = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step,
+            step_type=0,
+            element=self.element,
+            step_sort=2,
+            ope_key='upload',
+            ope_value={
+                'file_id': asset.id,
+                'file_name': 'reorder-upload.txt',
+                'value': f'file_id:{asset.id}',
+            },
+        )
+        FileReference.objects.create(
+            file=asset,
+            project=self.project,
+            ref_type=FileReference.REF_UI_PAGE_STEPS,
+            ref_id=f'detail:{upload_detail.id}',
+            created_by=self.user,
+        )
+
+        response = self.client.post('/api/ui-automation/page-steps-detailed/batch_update/', {
+            'page_step': self.page_step.id,
+            'steps': [
+                {
+                    'id': self.detail_two.id,
+                    'step_type': self.detail_two.step_type,
+                    'element': self.element.id,
+                    'ope_key': self.detail_two.ope_key,
+                    'ope_value': self.detail_two.ope_value,
+                },
+                {
+                    'id': upload_detail.id,
+                    'step_type': upload_detail.step_type,
+                    'element': self.element.id,
+                    'ope_key': upload_detail.ope_key,
+                    'ope_value': upload_detail.ope_value,
+                },
+                {
+                    'id': self.detail_one.id,
+                    'step_type': self.detail_one.step_type,
+                    'element': self.element.id,
+                    'ope_key': self.detail_one.ope_key,
+                    'ope_value': self.detail_one.ope_value,
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(FileAsset.objects.filter(id=asset.id).exists())
+        self.assertTrue(storage.exists(storage_name))
+        self.assertTrue(FileReference.objects.filter(
+            file=asset,
+            project=self.project,
+            ref_type=FileReference.REF_UI_PAGE_STEPS,
+            ref_id=f'detail:{upload_detail.id}',
+        ).exists())
+        upload_detail.refresh_from_db()
+        self.assertEqual(upload_detail.step_sort, 1)
+
+    def test_case_step_reorder_keeps_case_data_when_not_submitted(self):
+        url = '/api/ui-automation/case-steps/batch_update/'
+        expected_case_data = self.case_step.case_data
+
+        response = self.client.post(url, {
+            'test_case': self.test_case.id,
+            'steps': [
+                {
+                    'id': self.other_case_step.id,
+                    'page_step': self.other_case_step.page_step_id,
+                },
+                {
+                    'id': self.case_step.id,
+                    'page_step': self.case_step.page_step_id,
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertTrue(UiCaseStepsDetailed.objects.filter(id=self.case_step.id).exists())
+        self.case_step.refresh_from_db()
+        self.other_case_step.refresh_from_db()
+        self.assertEqual(self.case_step.case_sort, 1)
+        self.assertEqual(self.other_case_step.case_sort, 0)
+        self.assertEqual(self.case_step.case_data, expected_case_data)
