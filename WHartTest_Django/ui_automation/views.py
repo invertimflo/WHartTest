@@ -356,6 +356,16 @@ class UiElementViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(creator=self.request.user)
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        usage_count = instance.step_details.count()
+        if usage_count:
+            return Response(
+                {'error': f'元素已被 {usage_count} 个页面步骤引用，无法删除。请先移除相关步骤中的元素引用'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
 
 class UiPageStepsViewSet(viewsets.ModelViewSet):
     """页面步骤管理视图"""

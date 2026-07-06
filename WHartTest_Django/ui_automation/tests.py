@@ -75,6 +75,20 @@ class UiPageStepsExecuteDataTests(TestCase):
         self.assertTrue(detail['is_iframe'])
         self.assertEqual(detail['iframe_locator'], 'iframe.login-frame')
 
+    def test_delete_referenced_element_is_rejected(self):
+        client = APIClient()
+        client.force_authenticate(user=self.user)
+
+        response = client.delete(f'/api/ui-automation/elements/{self.element.id}/')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('元素已被 1 个页面步骤引用', response.data['error'])
+        self.assertTrue(UiElement.objects.filter(id=self.element.id).exists())
+        self.assertEqual(
+            UiPageStepsDetailed.objects.get(page_step=self.page_step, step_sort=0).element_id,
+            self.element.id,
+        )
+
     def test_execute_data_resolves_upload_file_id_to_file_path(self):
         asset = FileAsset.objects.create(
             project=self.project,
