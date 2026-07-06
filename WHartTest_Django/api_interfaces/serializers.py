@@ -5,6 +5,10 @@ from file_management.services import validate_file_ids, sync_file_references
 from file_management.models import FileReference
 
 
+EXTRACT_VARIABLE_TYPES = {'temporary', 'project'}
+EXTRACT_SOURCES = {'response', 'request'}
+
+
 class ApiInterfaceModuleInfoSerializer(serializers.Serializer):
     """Lightweight module serializer for embedding in interface detail."""
     id = serializers.IntegerField()
@@ -152,6 +156,48 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
         extract = attrs.get('extract', {})
         if not isinstance(extract, dict):
             raise serializers.ValidationError({"extract": "Must be a dict."})
+
+        extract_meta = attrs.get(
+            'extract_meta',
+            instance.extract_meta if instance else {},
+        )
+        if not isinstance(extract_meta, dict):
+            raise serializers.ValidationError({"extract_meta": "Must be a dict."})
+
+        normalized_extract_meta = {}
+        for variable_name, meta in extract_meta.items():
+            if not isinstance(meta, dict):
+                raise serializers.ValidationError({
+                    "extract_meta": f"Meta for variable '{variable_name}' must be a dict."
+                })
+
+            variable_type = meta.get('variable_type', 'temporary')
+            if variable_type not in EXTRACT_VARIABLE_TYPES:
+                raise serializers.ValidationError({
+                    "extract_meta": (
+                        f"Variable '{variable_name}' uses unsupported variable_type '{variable_type}'."
+                    )
+                })
+
+            normalized_extract_meta[variable_name] = {
+                'variable_type': variable_type,
+            }
+            if 'source' in meta:
+                source = meta.get('source', 'response')
+                if source not in EXTRACT_SOURCES:
+                    raise serializers.ValidationError({
+                        "extract_meta": (
+                            f"Variable '{variable_name}' uses unsupported source '{source}'."
+                        )
+                    })
+                normalized_extract_meta[variable_name]['source'] = source
+
+        extract_keys = set(extract.keys())
+        attrs['extract_meta'] = {
+            variable_name: meta
+            for variable_name, meta in normalized_extract_meta.items()
+            if variable_name in extract_keys
+        }
 
         return attrs
 

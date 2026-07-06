@@ -339,8 +339,12 @@ class InterfaceRunner(HttpRunner):
         # Extract
         if self.interface_data.get('extract'):
             extract_obj = step_obj.extract()
+            extract_meta = self.interface_data.get('extract_meta')
+            extract_meta = extract_meta if isinstance(extract_meta, dict) else {}
             for var_name, expr in self.interface_data['extract'].items():
-                extract_obj = extract_obj.with_jmespath(expr, var_name)
+                meta = extract_meta.get(var_name, {})
+                source = meta.get('source') if isinstance(meta, dict) else 'response'
+                extract_obj = extract_obj.with_jmespath(expr, var_name, source=source)
             step_obj = extract_obj
 
         # Validators

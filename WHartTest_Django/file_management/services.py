@@ -385,6 +385,17 @@ def resolve_file_reference_detail(ref: FileReference) -> dict:
                     'description': obj.description or '',
                     'module_name': obj.group.name if obj.group_id else '',
                 })
+        elif ref.ref_type == FileReference.REF_API_INTERFACE_CASE:
+            from api_testcases.models import ApiInterfaceCase
+            obj = ApiInterfaceCase.objects.select_related('group', 'interface').filter(id=ref_id, project_id=ref.project_id).first()
+            if obj:
+                data.update({
+                    'object_id': obj.id,
+                    'object_name': obj.name,
+                    'description': obj.description or '',
+                    'module_name': obj.interface.module.name if obj.interface and obj.interface.module_id else '',
+                    'interface_name': obj.interface.name if obj.interface_id else '',
+                })
         elif ref.ref_type == FileReference.REF_UI_TESTCASE:
             from ui_automation.models import UiTestCase
             obj = UiTestCase.objects.select_related('module').filter(id=ref_id, project_id=ref.project_id).first()

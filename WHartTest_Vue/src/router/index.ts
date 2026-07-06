@@ -151,6 +151,23 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
         component: () => import('@/features/api-testing/views/TestCaseCreateView.vue'),
       },
       {
+        path: 'api-testing/interface-cases/create',
+        name: 'ApiInterfaceCaseCreate',
+        component: () => import('@/features/api-testing/views/InterfaceCaseCreateView.vue'),
+      },
+      {
+        path: 'api-testing/interface-cases/:id/edit',
+        name: 'ApiInterfaceCaseEdit',
+        component: () => import('@/features/api-testing/views/InterfaceCaseEditView.vue'),
+        props: true,
+      },
+      {
+        path: 'api-testing/interface-cases/reports/:id',
+        name: 'ApiInterfaceCaseReportDetail',
+        component: () => import('@/features/api-testing/views/InterfaceCaseReportDetailView.vue'),
+        props: true,
+      },
+      {
         path: 'api-testing/testcases/:id/edit',
         name: 'ApiTestCaseEdit',
         component: () => import('@/features/api-testing/views/TestCaseEditView.vue'),

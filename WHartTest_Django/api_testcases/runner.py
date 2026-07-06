@@ -474,8 +474,12 @@ class TestCaseRunner(HttpRunner):
             # Add variable extractors
             if interface_data.get('extract'):
                 step_obj = step_obj.extract()
+                extract_meta = interface_data.get('extract_meta')
+                extract_meta = extract_meta if isinstance(extract_meta, dict) else {}
                 for var_name, expr in interface_data['extract'].items():
-                    step_obj = step_obj.with_jmespath(expr, var_name)
+                    meta = extract_meta.get(var_name, {})
+                    source = meta.get('source') if isinstance(meta, dict) else 'response'
+                    step_obj = step_obj.with_jmespath(expr, var_name, source=source)
 
             # Create Step object
             step = Step(step_obj)

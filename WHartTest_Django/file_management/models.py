@@ -70,12 +70,14 @@ class FileAsset(models.Model):
 class FileReference(models.Model):
     REF_API_INTERFACE = 'api_interface'
     REF_API_TESTCASE = 'api_testcase'
+    REF_API_INTERFACE_CASE = 'api_interface_case'
     REF_UI_TESTCASE = 'ui_testcase'
     REF_UI_PAGE_STEPS = 'ui_page_steps'
     REF_LLM_CHAT = 'llm_chat'
     REF_CHOICES = [
         (REF_API_INTERFACE, '接口'),
-        (REF_API_TESTCASE, '接口用例'),
+        (REF_API_TESTCASE, '测试用例'),
+        (REF_API_INTERFACE_CASE, '接口用例'),
         (REF_UI_TESTCASE, 'UI用例'),
         (REF_UI_PAGE_STEPS, 'UI页面步骤'),
         (REF_LLM_CHAT, 'LLM对话'),
