@@ -737,6 +737,7 @@ class TaskConsumer:
                     locator_value_3 = str(locator_value_3)
             else:
                 logger.warning(f"data_processor 为 None，跳过变量替换")
+
             if operation_type.lower() == 'upload':
                 original_input = input_value
                 input_value = resolve_runtime_file_path(input_value)
