@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "updated_at": "2026-05-21T14:38:43Z",
+  "updated_at": "2026-07-07T05:43:48Z",
   "skills": [
     {
       "id": "agent-browser-skill",
@@ -19,6 +19,15 @@
       "author": "mgdaas-lab",
       "tags": ["api", "automation", "wharttest"],
       "zip_path": "api-automation-skill.zip"
+    },
+    {
+      "id": "url-reader",
+      "name": "url-reader",
+      "description": "读取和分析任意在线 URL，提取网页标题、正文、链接、结构化数据；遇到 Swagger/OpenAPI/Redoc 时自动解析接口规格。",
+      "version": "1.0.0",
+      "author": "duanxiangchun",
+      "tags": ["url", "web", "docs", "openapi"],
+      "zip_path": "url-reader.zip"
     },
     {
       "id": "drawio",
