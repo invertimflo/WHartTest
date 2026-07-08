@@ -5,6 +5,7 @@ import json
 import types
 
 from httprunner import HttpRunner, Config, Step, RunRequest, RunSqlRequest
+from httprunner.client import sanitize_json_record
 from httprunner.models import TestCaseSummary
 from httprunner.parser import Parser
 
@@ -16,6 +17,7 @@ from .payloads import (
     normalize_request_body,
     prepare_request_body_for_runner,
 )
+from .validators import prepare_validator_for_runtime
 from .runner_uploads import (
     apply_upload_files_to_step,
     collect_file_ids_from_body,
@@ -407,24 +409,12 @@ class InterfaceRunner(HttpRunner):
         """Add validators to an HTTP step."""
         validate_obj = step_obj.validate()
         for validator in validators:
-            if not isinstance(validator, dict):
+            runtime_validator = prepare_validator_for_runtime(validator)
+            if not runtime_validator:
                 logger.warning(f"Unsupported validator format: {validator}")
                 continue
 
-            if "check" in validator and "expect" in validator:
-                validate_obj = validate_obj.assert_equal(
-                    validator["check"], validator["expect"]
-                )
-            elif len(validator) == 1:
-                comparator = list(validator.keys())[0]
-                check_item, expected_value = validator[comparator]
-                validate_obj = self._apply_comparator(
-                    validate_obj, comparator, check_item, expected_value
-                )
-            elif "eq" in validator:
-                check_value = validator["eq"][0]
-                expect_value = validator["eq"][1]
-                validate_obj = validate_obj.assert_equal(check_value, expect_value)
+            validate_obj.struct().validators.append(runtime_validator)
 
         return validate_obj
 
@@ -432,18 +422,11 @@ class InterfaceRunner(HttpRunner):
         """Add validators to a SQL step."""
         validate_obj = step_obj.validate()
         for validator in validators:
-            if not isinstance(validator, dict):
+            runtime_validator = prepare_validator_for_runtime(validator)
+            if not runtime_validator:
                 logger.warning(f"Unsupported validator format: {validator}")
                 continue
-            for comparator, (check_item, expected_value) in validator.items():
-                try:
-                    validate_obj = self._apply_comparator(
-                        validate_obj, comparator, check_item, expected_value
-                    )
-                except AttributeError as e:
-                    logger.warning(f"SQL validator method not found: {str(e)}")
-                except Exception as e:
-                    logger.warning(f"Failed to add validator: {str(e)}")
+            validate_obj.struct().validators.append(runtime_validator)
         return validate_obj
 
     def _apply_comparator(self, validate_obj, comparator, check_item, expected_value):
@@ -593,8 +576,8 @@ class InterfaceRunner(HttpRunner):
         result = {
             "success": step_result.success,
             "name": step_result.name,
-            "validation_results": validation_results,
-            "extracted_variables": step_result.export_vars,  # type: ignore
+            "validation_results": sanitize_json_record(validation_results),
+            "extracted_variables": sanitize_json_record(step_result.export_vars),  # type: ignore
         }
 
         if req_resp:
@@ -617,7 +600,7 @@ class InterfaceRunner(HttpRunner):
             )
             if is_transport_error:
                 result['success'] = False
-            request_data = {
+            request_data = sanitize_json_record({
                 "method": (
                     req_resp.request.method
                     if hasattr(req_resp, 'request') else None
@@ -634,14 +617,15 @@ class InterfaceRunner(HttpRunner):
                     req_resp.request.body
                     if hasattr(req_resp, 'request') else None
                 ),  # type: ignore
-            }
+            })
             recorded_request_body = request_data['body']
             fallback_used = self._apply_prepared_request_fallback(request_data, status_code)
+            request_data = sanitize_json_record(request_data)
             result.update({
                 "status_code": status_code,
                 "elapsed": elapsed,
                 "request": request_data,
-                "response": {
+                "response": sanitize_json_record({
                     "status_code": status_code,
                     "headers": (
                         req_resp.response.headers
@@ -655,7 +639,7 @@ class InterfaceRunner(HttpRunner):
                     "error": response_error,
                     "error_type": response_error_type,
                     "is_transport_error": is_transport_error,
-                },
+                }),
             })
             logger.info(
                 "Interface response assembled: trace_id=%s status_code=%s success=%s "
@@ -696,12 +680,12 @@ class InterfaceRunner(HttpRunner):
                         self.request_body_diagnostic,
                     )
         else:
-            request_data = {
+            request_data = sanitize_json_record({
                 "method": self.prepared_request_snapshot.get('method'),
                 "url": self.prepared_request_snapshot.get('url'),
                 "headers": copy.deepcopy(self.prepared_request_snapshot.get('headers', {})),
                 "body": copy.deepcopy(self.prepared_request_snapshot.get('body')),
-            }
+            })
             result.update({
                 "status_code": None,
                 "elapsed": 0,

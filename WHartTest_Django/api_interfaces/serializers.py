@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import ApiInterface, ApiInterfaceResult
 from .payloads import normalize_key_value_pairs, normalize_request_body
+from .validators import SUPPORTED_COMPARATORS, is_validator_meta_key
 from file_management.services import validate_file_ids, sync_file_references
 from file_management.models import FileReference
 
@@ -123,34 +124,34 @@ class ApiInterfaceSerializer(serializers.ModelSerializer):
         if not isinstance(validators, list):
             raise serializers.ValidationError({"validators": "Must be a list."})
 
-        supported_comparators = [
-            'eq', 'ne', 'gt', 'ge', 'gte', 'lt', 'le', 'lte',
-            'contains', 'contained_by', 'type_match', 'regex_match',
-            'startswith', 'endswith', 'str_eq',
-            'length_equal', 'length_greater_than', 'length_less_than',
-            'length_greater_or_equals', 'length_less_or_equals',
-        ]
-
         for validator in validators:
             if not isinstance(validator, dict):
                 raise serializers.ValidationError({"validators": "Each validator must be a dict."})
             if "check" in validator and "expect" in validator:
                 continue
-            valid_format = False
-            for key in validator.keys():
-                if key in supported_comparators:
-                    if not isinstance(validator[key], list) or len(validator[key]) != 2:
-                        raise serializers.ValidationError({
-                            "validators": f"Validator '{key}' must be a list of [field, expected_value]."
-                        })
-                    valid_format = True
-                    break
-            if not valid_format:
+            comparator_keys = [
+                key for key in validator.keys()
+                if not is_validator_meta_key(key)
+            ]
+            supported_keys = [
+                key for key in comparator_keys
+                if key in SUPPORTED_COMPARATORS
+            ]
+            unsupported_keys = [
+                key for key in comparator_keys
+                if key not in SUPPORTED_COMPARATORS
+            ]
+            if unsupported_keys or len(supported_keys) != 1:
                 raise serializers.ValidationError({
                     "validators": (
                         f"Validator must use a supported comparator: "
-                        f"{', '.join(supported_comparators)}, or use check/expect format."
+                        f"{', '.join(sorted(SUPPORTED_COMPARATORS))}, or use check/expect format."
                     )
+                })
+            comparator = supported_keys[0]
+            if not isinstance(validator[comparator], list) or len(validator[comparator]) != 2:
+                raise serializers.ValidationError({
+                    "validators": f"Validator '{comparator}' must be a list of [field, expected_value]."
                 })
 
         extract = attrs.get('extract', {})

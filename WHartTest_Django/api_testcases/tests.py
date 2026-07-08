@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
@@ -687,6 +688,38 @@ class TestExecutionConfigSslTest(TestCase):
 
         self.assertTrue(runner.config.struct().verify)
         mock_test_start.assert_called_once()
+
+    @patch('api_testcases.runner.TestCaseRunner.test_start')
+    def test_runner_preserves_validator_expected_value_type_meta(self, mock_test_start):
+        testcase = ApiTestCase.objects.create(
+            name='Validator Meta Test',
+            project=self.project,
+            created_by=self.user,
+            config={},
+        )
+        ApiTestCaseStep.objects.create(
+            name='Step 1',
+            order=1,
+            interface_data={
+                'method': 'GET',
+                'url': '/oauth/token',
+                'validators': [{
+                    'gt': ['body.count', '${min_count}'],
+                    '__expected_value_type': 'number',
+                }],
+            },
+            testcase=testcase,
+        )
+
+        runner = TestCaseRunner(testcase)
+
+        self.assertEqual(
+            runner.teststeps[0].struct().validators,
+            [{
+                'gt': ['body.count', '${min_count}'],
+                '__expected_value_type': 'number',
+            }],
+        )
 
 
 class TestCaseRunnerSummaryTest(TestCase):
@@ -1931,6 +1964,94 @@ class TestExecutionServiceTest(TestCase):
         mock_reports = [MagicMock(status='success')] * 5
         stats = TestExecutionService.get_statistics(mock_reports)
         self.assertEqual(stats['success_rate'], '100.00%')
+
+
+class TestExecutionServiceBinaryResponseTest(TestCase):
+    """Binary response persistence tests for API testcase execution."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='binaryuser', password='testpass')
+        self.project = Project.objects.create(name='Binary Project', creator=self.user)
+
+    @patch('api_testcases.services.TestCaseRunner')
+    def test_run_testcase_persists_binary_response_summary(self, mock_runner_class):
+        testcase = ApiTestCase.objects.create(
+            name='Export Test', project=self.project, created_by=self.user,
+        )
+        step = ApiTestCaseStep.objects.create(
+            name='Export Step',
+            order=1,
+            interface_data={'method': 'GET', 'url': '/export'},
+            testcase=testcase,
+        )
+
+        binary_body = {
+            'type': 'binary',
+            'binary': True,
+            'omitted': True,
+            'message': 'Binary response body omitted from execution report.',
+            'content_type': (
+                'application/vnd.openxmlformats-officedocument.'
+                'spreadsheetml.sheet'
+            ),
+            'content_length': 27,
+            'sha256': 'ec87bf8d16798a742b068101b3e49f5daa206ee3cee6f7d29234b81df367d1a0',
+            'preview_hex': '504b030414000000080066616b652d786c7378',
+            'filename': 'report.xlsx',
+        }
+        step_results = [{
+            'name': step.name,
+            'success': True,
+            'elapsed': 0.12,
+            'step_type': 'request',
+            'data': {
+                'request': {
+                    'method': 'GET',
+                    'url': 'http://example.com/export',
+                    'headers': {},
+                    'body': None,
+                },
+                'response': {
+                    'status_code': 200,
+                    'headers': {
+                        'Content-Type': binary_body['content_type'],
+                        'Content-Disposition': 'attachment; filename=report.xlsx',
+                    },
+                    'body': binary_body,
+                    'content_size': 27,
+                    'response_time_ms': 120,
+                },
+                'validators': {
+                    'success': True,
+                    'validate_extractor': [{'check_result': 'pass'}],
+                },
+                'extracted_variables': {},
+            },
+            'attachment': '',
+        }]
+        summary = {
+            'success': True,
+            'name': testcase.name,
+            'time': {'start_at': '2026-07-08T00:00:00', 'duration': 0.12},
+            'in_out': {'config_vars': {}, 'export_vars': {}},
+            'log': '',
+            'step_results': step_results,
+        }
+
+        mock_runner = MagicMock()
+        mock_runner.run_testcase.return_value = mock_runner
+        mock_runner.get_summary.return_value = summary
+        mock_runner.get_step_results.return_value = step_results
+        mock_runner_class.return_value = mock_runner
+
+        report = TestExecutionService.run_testcase(testcase, user=self.user)
+        detail = report.details.get()
+
+        self.assertEqual(report.status, 'success')
+        self.assertTrue(detail.response['body']['binary'])
+        self.assertEqual(detail.response['body']['filename'], 'report.xlsx')
+        self.assertNotIn('\x00', json.dumps(report.summary, ensure_ascii=False))
+        self.assertNotIn('\x00', json.dumps(detail.response, ensure_ascii=False))
 
 
 class ApiTestCaseFilterTest(TestCase):

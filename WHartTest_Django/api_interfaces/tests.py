@@ -988,6 +988,45 @@ class ApiInterfaceRunnerTest(TestCase):
 
     @patch('api_interfaces.runner.load_custom_functions', return_value={})
     @patch('httprunner.HttpRunner.test_start')
+    def test_runner_preserves_validator_expected_value_type_meta(
+        self,
+        mock_test_start,
+        mock_load_funcs,
+    ):
+        """断言值类型元数据应进入 HttpRunner，供变量解析后做类型转换。"""
+        from .runner import InterfaceRunner
+
+        interface_data = {
+            'name': 'Validator Meta Test',
+            'type': 'http',
+            'method': 'GET',
+            'url': 'http://example.com/api/test',
+            'headers': {},
+            'params': {},
+            'body': {},
+            'variables': {},
+            'validators': [{
+                'gt': ['body.count', '${min_count}'],
+                '__expected_value_type': 'number',
+            }],
+            'extract': {},
+            'setup_hooks': [],
+            'teardown_hooks': [],
+            'project_id': self.project.pk,
+        }
+
+        runner = InterfaceRunner(interface_data)
+
+        self.assertEqual(
+            runner.teststeps[0].struct().validators,
+            [{
+                'gt': ['body.count', '${min_count}'],
+                '__expected_value_type': 'number',
+            }],
+        )
+
+    @patch('api_interfaces.runner.load_custom_functions', return_value={})
+    @patch('httprunner.HttpRunner.test_start')
     def test_runner_init_sql(self, mock_test_start, mock_load_funcs):
         """测试 SQL Runner 初始化"""
         from .runner import InterfaceRunner
