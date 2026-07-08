@@ -147,7 +147,7 @@
         <div class="footer-left">
           <a-progress
             v-if="batchRunning || batchCompletedAt"
-            :percent="batchPercent"
+            :percent="batchProgressRatio"
             :status="batchProgressStatus"
             :show-text="true"
             :style="{ width: '260px' }"
@@ -354,9 +354,10 @@ const selectedNotInstalledCount = computed(() => filteredStates.value.filter(s =
 const allSelected = computed(() => filteredStates.value.length > 0 && filteredStates.value.every(s => s.selected))
 const someSelected = computed(() => filteredStates.value.some(s => s.selected))
 
-const batchPercent = computed(() => {
+const batchProgressRatio = computed(() => {
   if (batchTotal.value === 0) return 0
-  return Math.round((batchProcessed.value / batchTotal.value) * 100)
+  const roundedPercent = Math.round((batchProcessed.value / batchTotal.value) * 100)
+  return Math.min(Math.max(roundedPercent / 100, 0), 1)
 })
 
 const batchProgressStatus = computed(() => {
