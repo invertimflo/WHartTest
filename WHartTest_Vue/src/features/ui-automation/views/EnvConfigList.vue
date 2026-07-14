@@ -225,7 +225,6 @@ const formData = reactive<UiEnvironmentConfigForm>({
   db_rud_status: false,
   db_type: 'mysql',
   mysql_config: {},
-
   extra_config: {},
   is_default: false,
 })
@@ -296,7 +295,6 @@ const resetForm = () => {
     db_rud_status: false,
     db_type: 'mysql',
     mysql_config: {},
-
     extra_config: {},
     is_default: false,
   })
@@ -340,6 +338,15 @@ const editConfig = (record: UiEnvironmentConfig) => {
   modalVisible.value = true
 }
 
+const buildMysqlConfig = () => {
+  const cfg: Record<string, unknown> = {}
+  if (mysqlConfig.host) cfg.host = mysqlConfig.host
+  if (mysqlConfig.port) cfg.port = mysqlConfig.port
+  if (mysqlConfig.user) cfg.user = mysqlConfig.user
+  if (mysqlConfig.password) cfg.password = mysqlConfig.password
+  if (mysqlConfig.database) cfg.database = mysqlConfig.database
+  return cfg
+}
 
 const handleSubmit = async (done: (closed: boolean) => void) => {
   try {
@@ -354,7 +361,6 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     const data = {
       ...formData,
       mysql_config: buildMysqlConfig(),
-
     }
     if (isEdit.value && currentConfig.value) {
       await envConfigApi.update(currentConfig.value.id, data)
