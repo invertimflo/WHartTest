@@ -1,6 +1,15 @@
 from django.db import migrations, models
 
 
+def migrate_db2_environment_configs(apps, schema_editor):
+    UiEnvironmentConfig = apps.get_model("ui_automation", "UiEnvironmentConfig")
+    UiEnvironmentConfig.objects.filter(db_type="db2").update(
+        db_type="mysql",
+        db_c_status=False,
+        db_rud_status=False,
+    )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -9,11 +18,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(
-            code=lambda apps, schema_editor: apps.get_model(
-                "ui_automation", "UiEnvironmentConfig"
-            )
-            .objects.filter(db_type="db2")
-            .update(db_type="mysql", db_c_status=False, db_rud_status=False),
+            code=migrate_db2_environment_configs,
             reverse_code=migrations.RunPython.noop,
         ),
         migrations.RemoveField(
