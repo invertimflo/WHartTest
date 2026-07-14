@@ -339,6 +339,8 @@ const editConfig = (record: UiEnvironmentConfig) => {
 }
 
 const buildMysqlConfig = () => {
+  if (!formData.db_c_status && !formData.db_rud_status) return {}
+  if (formData.db_type !== 'mysql') return {}
   const cfg: Record<string, unknown> = {}
   if (mysqlConfig.host) cfg.host = mysqlConfig.host
   if (mysqlConfig.port) cfg.port = mysqlConfig.port
