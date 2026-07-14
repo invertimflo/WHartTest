@@ -7,7 +7,6 @@ import asyncio
 import importlib
 import json
 import logging
-import re
 import time
 import traceback
 from pathlib import Path
@@ -328,7 +327,7 @@ class PlaywrightExecutor:
             raise ValueError("执行SQL步骤需要选择包含数据库配置的执行环境")
 
         db_type = str(sql_config.get('db_type') or env_config.get('db_type') or 'mysql').lower()
-        if db_type not in {'mysql', 'db2'}:
+        if db_type != 'mysql':
             raise ValueError(f"不支持的UI自动化数据库类型: {db_type}")
 
         direct_config = sql_config.get('connection') or sql_config.get('db_config')
@@ -430,22 +429,6 @@ class PlaywrightExecutor:
             cursorclass=pymysql.cursors.DictCursor,
         )
 
-    def _connect_db2(self, config: dict[str, Any]):
-        try:
-            ibm_db_dbi = importlib.import_module('ibm_db_dbi')
-        except ImportError as exc:
-            raise RuntimeError("执行DB2 SQL步骤需要安装依赖 ibm_db") from exc
-
-        dsn = (
-            f"DATABASE={config['database']};"
-            f"HOSTNAME={config['host']};"
-            f"PORT={int(config['port'])};"
-            "PROTOCOL=TCPIP;"
-            f"UID={config['user']};"
-            f"PWD={config['password']};"
-        )
-        return ibm_db_dbi.connect(dsn, '', '')
-
     def _execute_sql_step(
         self,
         step: StepConfig,
@@ -455,19 +438,13 @@ class PlaywrightExecutor:
         if env_config is None:
             raise ValueError("执行SQL步骤需要执行环境")
         self._validate_sql_permission(sql_config, env_config)
-        db_type, db_config = self._resolve_sql_connection_config(sql_config, env_config)
+        _, db_config = self._resolve_sql_connection_config(sql_config, env_config)
 
         conn = None
         cursor = None
         try:
-            conn = self._connect_db2(db_config) if db_type == 'db2' else self._connect_mysql(db_config)
+            conn = self._connect_mysql(db_config)
             cursor = conn.cursor()
-
-            if db_type == 'db2' and db_config.get('schema'):
-                schema = str(db_config['schema'])
-                if not re.match(r'^[A-Za-z_][A-Za-z0-9_@$#]*$', schema):
-                    raise ValueError("DB2 schema 只能包含字母、数字、下划线、@、$、#，且不能以数字开头")
-                cursor.execute(f"SET CURRENT SCHEMA {schema}")
 
             self._execute_cursor(cursor, sql_config['sql'], sql_config['params'])
 
