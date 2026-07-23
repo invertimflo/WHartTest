@@ -73,3 +73,6 @@ WHartTest_IDEA_Plugin/
 WHartTest_VSCode_Extension/
 docx-editor/
 
+# add develop files
+ISSUE.md
+issue.md
