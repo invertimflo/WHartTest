@@ -25,6 +25,10 @@ except ImportError:
 # 配置
 BASE_URL = os.environ.get("WHARTTEST_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 API_KEY = os.environ.get("WHARTTEST_API_KEY", "wharttest-default-mcp-key-2025")
+if not BASE_URL:
+    BASE_URL = "http://127.0.0.1:8000"
+if not API_KEY:
+    API_KEY = "wharttest-default-mcp-key-2025"
 HEADERS = {
     "accept": "application/json, text/plain,*/*",
     "X-API-Key": API_KEY

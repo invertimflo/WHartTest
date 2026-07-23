@@ -183,6 +183,7 @@ goto :eof
         mcp_tools operation_logs orchestrator_integration projects
         prompts requirements skills task_center ui_automation
         weixin_integration testcase_templates testcases wharttest_django
+        file_management
     ) do (
         if exist "%DJANGO_SRC%\%%d" (
             docker cp "%DJANGO_SRC%\%%d\." "%BACKEND_CONTAINER%:/app/%%d/" >nul 2>&1
