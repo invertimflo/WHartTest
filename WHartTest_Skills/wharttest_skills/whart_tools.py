@@ -206,15 +206,17 @@ def get_levels():
     return ["P0", "P1", "P2", "P3"]
 
 
-def get_testcases(project_id: int, module_id: int):
+def get_testcases(project_id: int, module_id: int, page: int = 1):
     """获取用例列表"""
-    url = f"{_base_url()}/api/projects/{project_id}/testcases/?page=1&page_size=1000&module_id={module_id}"
+    # url = f"{_base_url()}/api/projects/{project_id}/testcases/?page=1&page_size=1000&module_id={module_id}"
+    url = f"{_base_url()}/api/projects/{project_id}/testcases/?page={page}&page_size=1000&module_id={module_id}"
     try:
         resp = requests.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json().get("data", {})
-        data = data.get("results", [])
-        return [{"case_id": i.get("id"), "case_name": i.get("name")} for i in data]
+        # data = data.get("results", [])
+        # return [{"case_id": i.get("id"), "case_name": i.get("name")} for i in data]
+        return data
     except Exception as e:
         return {"error": str(e)}
 
@@ -763,7 +765,7 @@ ACTIONS = {
     "get_modules": lambda args: get_modules(args.project_id),
     "add_module": lambda args: add_module(args.project_id, args.name, args.parent_id),
     "get_levels": lambda args: get_levels(),
-    "get_testcases": lambda args: get_testcases(args.project_id, args.module_id),
+    "get_testcases": lambda args: get_testcases(args.project_id, args.module_id, args.page),
     "get_testcase_detail": lambda args: get_testcase_detail(args.project_id, args.case_id),
     "add_testcase": lambda args: (
         _parse_steps(args.steps) if isinstance(_parse_steps(args.steps), dict) else

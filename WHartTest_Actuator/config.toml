@@ -1,13 +1,13 @@
 [server]
 ws_url = "ws://127.0.0.1:8000/ws/ui/actuator/"
-api_url = "http://172.31.69.83:5173"
+api_url = "http://localhost:8912"
 use_gui = true
 api_key = "wharttest-default-mcp-key-2025"
-api_username = "admin"
-api_password = "admin123456"
+api_username = "test"
+api_password = "test123456"
 
 [actuator]
-name = "Actuator"
+
 
 [browser]
 browser_type = "chromium"
@@ -18,6 +18,13 @@ launch_timeout = 30
 action_timeout = 5
 viewport_width = 1280
 viewport_height = 720
+client_cert_enabled = false
+client_cert_pfx_path = "./certs/client.pfx"
+client_cert_cert_path = ""
+client_cert_key_path = ""
+client_cert_origins = ""
+client_cert_passphrase = "changeme"
+ignore_https_errors = true
 
 [execution]
 retry_count = 3
@@ -31,10 +38,20 @@ enabled = true
 trace_dir = "./data/traces"
 screenshots = true
 snapshots = true
-sources = false
+sources = true
 
 [logging]
 level = "INFO"
 
 [gui]
 language = "zh"
+
+[model]
+api_url = "http://192.168.2.180:3000/v1"
+api_key = "sk-Cra0HlWnPgKnL8VP03Df097eA3B24dBcB1904d32C3812783"
+model = "qwen3-coder"
+provider = "openai_compatible"
+supports_vision = false
+context_limit = 100000
+max_steps = 25
+temperature = 0.0

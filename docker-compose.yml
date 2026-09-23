@@ -117,7 +117,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/')" ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/admin/')" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -149,7 +149,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health" ]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3001/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -171,7 +171,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/" ]
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -191,8 +191,8 @@ services:
       - WHARTTEST_BACKEND_URL=${WHARTTEST_BACKEND_URL:-http://backend:8000}
       # 使用系统自动生成的默认API Key，生产环境请在.env中覆盖
       - WHARTTEST_API_KEY=${WHARTTEST_API_KEY:-wharttest-default-mcp-key-2025}
-      # MS MCP API 配置（可选）
       - MS_API_HOST=${MS_API_HOST:-http://ms.example.com}
+      # MS MCP API 配置（可选）
       - MS_ACCESS_KEY=${MS_ACCESS_KEY:-your_16byte_key1}
       - MS_SECRET_KEY=${MS_SECRET_KEY:-your_16byte_key2}
     ports:
@@ -206,7 +206,7 @@ services:
       - wharttest-network
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/')" ]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health/')" ]
       interval: 30s
       timeout: 10s
       retries: 3

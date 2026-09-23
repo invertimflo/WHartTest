@@ -395,5 +395,12 @@ def add_functional_case(
         return e
 
 
+from starlette.responses import JSONResponse
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    return JSONResponse({"status": "healthy", "service": "ms_mcp_api mcp-server"})
+
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8007)

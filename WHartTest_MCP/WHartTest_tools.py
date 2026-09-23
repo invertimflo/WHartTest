@@ -755,6 +755,13 @@ update 操作：
     )
 
 
+from starlette.responses import JSONResponse
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    return JSONResponse({"status": "healthy", "service": "wharttest_tools mcp-server"})
+
+
 if __name__ == "__main__":
     # 使用 streamable-http 传输方式
     # host="0.0.0.0" 允许从其他容器访问

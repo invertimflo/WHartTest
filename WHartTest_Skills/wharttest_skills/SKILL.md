@@ -31,7 +31,7 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 | Action | 描述 | 参数 |
 |--------|------|------|
 | `get_levels` | 获取用例等级列表 | 无 |
-| `get_testcases` | 获取模块下的用例列表 | `--project_id`, `--module_id` |
+| `get_testcases` | 获取模块下的用例列表 | `--project_id`, `--module_id`, `--page` |
 | `get_testcase_detail` | 获取用例详情 | `--project_id`, `--case_id` |
 | `add_testcase` | 新增测试用例 | `--project_id`, `--module_id`, `--name`, `--level`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type`, `--ui_test_case_id`, `--execution_mode` |
 | `edit_testcase` | 编辑测试用例（支持关联/解绑 UI 自动化用例） | `--project_id`, `--case_id`, `--name`, `--level`, `--module_id`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type`, `--ui_test_case_id`, `--execution_mode`, `--is_optimization` |
@@ -117,7 +117,7 @@ python whart_tools.py --action add_module --project_id 1 --name "新功能模块
 python whart_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
 
 # 获取用例列表
-python whart_tools.py --action get_testcases --project_id 1 --module_id 5
+python whart_tools.py --action get_testcases --project_id 1 --module_id 5 --page 1
 
 # 新增用例
 python whart_tools.py --action add_testcase \

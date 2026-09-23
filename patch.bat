@@ -7,8 +7,9 @@ setlocal enabledelayedexpansion
 :: WHartTest Docker Patch Script
 :: =========================================================
 :: Description: Hot-patch source code into running Docker containers
-:: without rebuilding images. Supports backend (Django) and
-:: frontend (Vue) full updates.
+:: without rebuilding images. Supports backend (Django), frontend
+:: (Vue) and MCP full updates. Runs all patches by default on
+:: every invocation.
 :: =========================================================
 
 set SCRIPT_DIR=%~dp0
@@ -17,39 +18,15 @@ cd /d "%SCRIPT_DIR%"
 :: ---------- Configuration (modify as needed) ----------
 set BACKEND_CONTAINER=wharttest-backend
 set FRONTEND_CONTAINER=wharttest-frontend
+set MCP_CONTAINER=wharttest-mcp
 set DJANGO_SRC=WHartTest_Django
 set VUE_SRC=WHartTest_Vue
+set MCP_SRC=WHartTest_MCP
 :: -------------------------------------------------------
 
-:: Defaults
-set DO_BACKEND=0
-set DO_FRONTEND=0
-
-:: =========================================================
-:: Parse command-line arguments
-:: =========================================================
-:parse_args
-if "%~1"=="" goto :args_done
-if /i "%~1"=="-b" set DO_BACKEND=1& goto :next_arg
-if /i "%~1"=="--backend" set DO_BACKEND=1& goto :next_arg
-if /i "%~1"=="-f" set DO_FRONTEND=1& goto :next_arg
-if /i "%~1"=="--frontend" set DO_FRONTEND=1& goto :next_arg
-if /i "%~1"=="-a" set DO_BACKEND=1& set DO_FRONTEND=1& goto :next_arg
-if /i "%~1"=="--all" set DO_BACKEND=1& set DO_FRONTEND=1& goto :next_arg
-if /i "%~1"=="-h" goto :show_help
-if /i "%~1"=="--help" goto :show_help
-echo [ERROR] Unknown argument: %~1
-exit /b 1
-:next_arg
-shift
-goto :parse_args
-:args_done
-
-:: Default: update both if nothing specified
-if %DO_BACKEND%==0 if %DO_FRONTEND%==0 (
-    set DO_BACKEND=1
-    set DO_FRONTEND=1
-)
+:: ---------- Optional help ----------
+if "%~1"=="-h" goto :show_help
+if "%~1"=="--help" goto :show_help
 
 :: =========================================================
 :: Pre-flight checks
@@ -76,45 +53,49 @@ if %errorlevel% neq 0 (
 
 echo.
 
-if %DO_BACKEND%==1 (
-    call :check_dirs_backend
-    if !ERRORLEVEL! neq 0 exit /b 1
-)
-if %DO_FRONTEND%==1 (
-    call :check_dirs_frontend
-    if !ERRORLEVEL! neq 0 exit /b 1
-)
+call :check_dirs_backend
+if !ERRORLEVEL! neq 0 exit /b 1
+call :check_dirs_frontend
+if !ERRORLEVEL! neq 0 exit /b 1
+call :check_dirs_mcp
+if !ERRORLEVEL! neq 0 exit /b 1
 
 :: =========================================================
-:: Main workflow
+:: Main workflow (patch all by default)
 :: =========================================================
 
-if %DO_BACKEND%==1 (
-    echo [Backend] ^>^>^> Updating backend code ...
-    call :patch_backend_full
-    if !ERRORLEVEL! neq 0 (
-        echo [Backend] [FAILED] Backend update failed
-        exit /b 1
-    )
-    echo [Backend] [DONE] Backend code updated successfully
-    echo.
+echo [Backend] ^>^>^> Updating backend code ...
+call :patch_backend_full
+if !ERRORLEVEL! neq 0 (
+    echo [Backend] [FAILED] Backend update failed
+    exit /b 1
 )
+echo [Backend] [DONE] Backend code updated successfully
+echo.
 
-if %DO_FRONTEND%==1 (
-    echo [Frontend] ^>^>^> Updating frontend code ...
-    call :patch_frontend
-    if !ERRORLEVEL! neq 0 (
-        echo [Frontend] [FAILED] Frontend update failed
-        exit /b 1
-    )
-    echo [Frontend] [DONE] Frontend code updated successfully
-    echo.
+echo [Frontend] ^>^>^> Updating frontend code ...
+call :patch_frontend
+if !ERRORLEVEL! neq 0 (
+    echo [Frontend] [FAILED] Frontend update failed
+    exit /b 1
 )
+echo [Frontend] [DONE] Frontend code updated successfully
+echo.
+
+echo [MCP] ^>^>^> Updating MCP code ...
+call :patch_mcp
+if !ERRORLEVEL! neq 0 (
+    echo [MCP] [FAILED] MCP update failed
+    exit /b 1
+)
+echo [MCP] [DONE] MCP code updated successfully
+echo.
 
 :: Restart services
 echo [Restart] Restarting container services ...
-if %DO_BACKEND%==1 call :restart_backend
-if %DO_FRONTEND%==1 call :restart_frontend
+call :restart_backend
+call :restart_frontend
+call :restart_mcp
 
 echo.
 echo ========================================
@@ -160,6 +141,26 @@ goto :eof
     )
     echo [Frontend] Container: %FRONTEND_CONTAINER%
     echo [Frontend] Source: %CD%\%VUE_SRC%
+    exit /b 0
+
+:check_dirs_mcp
+    if not exist "%MCP_SRC%\ms_mcp_api.py" (
+        echo [ERROR] %MCP_SRC%\ms_mcp_api.py not found
+        echo         Run this script from the WHartTest repository root
+        exit /b 1
+    )
+    if not exist "%MCP_SRC%\WHartTest_tools.py" (
+        echo [ERROR] %MCP_SRC%\WHartTest_tools.py not found
+        exit /b 1
+    )
+    docker inspect %MCP_CONTAINER% >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [ERROR] Container %MCP_CONTAINER% is not running
+        echo         Please start the Docker container: docker compose up -d mcp
+        exit /b 1
+    )
+    echo [MCP] Container: %MCP_CONTAINER%
+    echo [MCP] Source: %CD%\%MCP_SRC%
     exit /b 0
 
 
@@ -261,6 +262,19 @@ goto :eof
 
 
 :: =========================================================
+:: MCP patch - Copy source files into the container
+:: =========================================================
+:patch_mcp
+
+    echo [MCP] Copying source files to container (%MCP_CONTAINER%) ...
+    docker cp "%MCP_SRC%\ms_mcp_api.py" "%MCP_CONTAINER%:/app/" >nul 2>&1
+    docker cp "%MCP_SRC%\WHartTest_tools.py" "%MCP_CONTAINER%:/app/" >nul 2>&1
+    docker cp "%MCP_SRC%\playwright-mcp-config.json" "%MCP_CONTAINER%:/app/" >nul 2>&1
+    echo [MCP] Source files copied
+    exit /b 0
+
+
+:: =========================================================
 :: Restart backend services (supervisor-managed processes)
 :: =========================================================
 :restart_backend
@@ -294,21 +308,32 @@ goto :eof
 
 
 :: =========================================================
+:: Restart MCP services (supervisor-managed processes)
+:: =========================================================
+:restart_mcp
+
+    echo [Restart] Restarting MCP services (supervisor) ...
+    docker exec %MCP_CONTAINER% supervisorctl restart ms_mcp_api >nul 2>&1
+    docker exec %MCP_CONTAINER% supervisorctl restart wharttest_tools >nul 2>&1
+
+    docker restart %MCP_CONTAINER% >nul 2>&1
+    echo [MCP] Services restarted
+    exit /b 0
+
+
+:: =========================================================
 :: Help
 :: =========================================================
 :show_help
     echo Usage: patch.bat [options]
     echo.
-    echo Options:
-    echo   -b, --backend     Update backend only (Django)
-    echo   -f, --frontend    Update frontend only (Vue)
-    echo   -a, --all         Update both backend and frontend (default)
-    echo   -h, --help        Show this help
+    echo Description:
+    echo   Hot-patch backend (Django), frontend (Vue) and MCP source code
+    echo   into the running Docker containers, then restart their services.
+    echo   All three patches run by default on every invocation.
     echo.
-    echo Examples:
-    echo   patch.bat                   Update both (full mode)
-    echo   patch.bat -b                Update backend only
-    echo   patch.bat -f                Update frontend only
+    echo Options:
+    echo   -h, --help        Show this help
     echo.
     echo Prerequisites:
     echo   - Docker Desktop is running
@@ -316,4 +341,3 @@ goto :eof
     echo   - Frontend update requires Node.js
     echo.
     goto :eof
-
