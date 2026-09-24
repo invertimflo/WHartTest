@@ -21,6 +21,7 @@ import EnvironmentList from './EnvironmentList.vue'
 import EnvironmentForm from './EnvironmentForm.vue'
 import GlobalHeadersPanel from './GlobalHeadersPanel.vue'
 import DatabaseConfigPanel from './DatabaseConfigPanel.vue'
+import ClientCertPanel from './ClientCertPanel.vue'
 import {
   IconPlus,
   IconEdit,
@@ -29,7 +30,8 @@ import {
   IconSettings,
   IconLink,
   IconFile,
-  IconInfoCircle
+  IconInfoCircle,
+  IconSafe
 } from '@arco-design/web-vue/es/icon'
 
 const projectStore = useProjectStore()
@@ -40,12 +42,14 @@ const loading = ref(false)
 const formLoading = ref(false)
 const environments = ref<Environment[]>([])
 const searchKeyword = ref('')
-const activeTab = ref('list') // 'list' | 'create' | 'edit' | 'detail' | 'global-headers' | 'database-config'
+const activeTab = ref('list') // 'list' | 'create' | 'edit' | 'detail' | 'global-headers' | 'database-config' | 'client-cert'
 const selectedEnvironment = ref<Environment | null>(null)
 const showGlobalHeaders = ref(false)
 const showDatabaseConfig = ref(false)
+const showClientCert = ref(false)
 const globalHeadersPanel = ref<{ handleCreate: () => void } | null>(null)
 const databaseConfigPanel = ref<{ handleCreate: () => void } | null>(null)
+const clientCertPanel = ref<{ handleCreate: () => void } | null>(null)
 const isDarkTheme = computed(() => themeStore.isBlack)
 const actionText = computed(() => isEnglish.value
   ? {
@@ -53,6 +57,7 @@ const actionText = computed(() => isEnglish.value
       saveChanges: 'Save Changes',
       addHeader: 'Add Header',
       addConfig: 'Add Config',
+      addCertificate: 'Add Certificate',
       enabled: 'Enabled',
       disabled: 'Disabled',
       edit: 'Edit',
@@ -69,6 +74,7 @@ const actionText = computed(() => isEnglish.value
       saveChanges: '保存更改',
       addHeader: '添加请求头',
       addConfig: '添加配置',
+      addCertificate: '添加证书',
       enabled: '启用',
       disabled: '禁用',
       edit: '编辑',
@@ -91,6 +97,7 @@ interface FormData {
   is_active: boolean
   variables: EnvironmentVariable[]
   database_config?: number | null
+  client_certificate?: number | null
   verify_ssl?: boolean
 }
 
@@ -103,6 +110,7 @@ const createForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: "null" as any,
+  client_certificate: null,
   verify_ssl: false
 })
 
@@ -140,6 +148,7 @@ const switchToCreate = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
+    client_certificate: null,
     verify_ssl: false
   }
   activeTab.value = 'create'
@@ -290,6 +299,7 @@ const editForm = ref<FormData>({
   is_active: true,
   variables: [],
   database_config: null,
+  client_certificate: null,
   verify_ssl: false
 })
 
@@ -341,6 +351,7 @@ const handleEdit = async (record: Environment) => {
       is_active: record.is_active,
       variables: record.variables || [],
       database_config: Number(record.database_config) || "null" as any,
+      client_certificate: record.client_certificate ? Number(record.client_certificate) : null,
       verify_ssl: record.verify_ssl === true
     }
 
@@ -370,6 +381,7 @@ const handleEdit = async (record: Environment) => {
         is_active: updatedRecord.is_active,
         variables: updatedRecord.variables || [],
         database_config: Number(updatedDatabaseConfig) || null,
+        client_certificate: (updatedRecord as any).client_certificate_info?.id ?? null,
         verify_ssl: updatedRecord.verify_ssl === true,
         database_config_info: (updatedRecord as any).database_config_info
       } as any
@@ -435,6 +447,7 @@ const handleEditSubmit = async () => {
           is_active: updatedEnv.is_active,
           variables: updatedEnv.variables || [],
           database_config: Number(updatedDatabaseConfig) || null,
+          client_certificate: (updatedEnv as any).client_certificate_info?.id ?? null,
           verify_ssl: updatedEnv.verify_ssl === true,
           database_config_info: (updatedEnv as any).database_config_info
         } as any
@@ -461,6 +474,7 @@ const resetCreateForm = () => {
     is_active: true,
     variables: [],
     database_config: "null" as any,
+    client_certificate: null,
     verify_ssl: false
   }
 }
@@ -521,6 +535,7 @@ watch(() => selectedEnvironment.value, (newVal) => {
 const handleSelectGlobalHeaders = () => {
   showGlobalHeaders.value = true
   showDatabaseConfig.value = false
+  showClientCert.value = false
   selectedEnvironment.value = null
   activeTab.value = 'global-headers'
 }
@@ -529,8 +544,18 @@ const handleSelectGlobalHeaders = () => {
 const handleSelectDatabaseConfig = () => {
   showDatabaseConfig.value = true
   showGlobalHeaders.value = false
+  showClientCert.value = false
   selectedEnvironment.value = null
   activeTab.value = 'database-config'
+}
+
+// 切换到客户端证书
+const handleSelectClientCert = () => {
+  showClientCert.value = true
+  showGlobalHeaders.value = false
+  showDatabaseConfig.value = false
+  selectedEnvironment.value = null
+  activeTab.value = 'client-cert'
 }
 
 onMounted(() => {
@@ -551,11 +576,13 @@ onMounted(() => {
         :searchKeyword="searchKeyword"
         :showGlobalHeaders="showGlobalHeaders"
         :showDatabaseConfig="showDatabaseConfig"
+        :showClientCert="showClientCert"
         @update:searchKeyword="searchKeyword = $event"
         @select="handleViewDetail"
         @create="switchToCreate"
         @selectGlobalHeaders="handleSelectGlobalHeaders"
         @selectDatabaseConfig="handleSelectDatabaseConfig"
+        @selectClientCert="handleSelectClientCert"
       />
     </div>
 
@@ -929,6 +956,36 @@ onMounted(() => {
         
         <div class="content-body">
           <DatabaseConfigPanel ref="databaseConfigPanel" />
+        </div>
+      </div>
+
+      <!-- 客户端证书面板 -->
+      <div v-else-if="activeTab === 'client-cert'" class="h-full flex flex-col">
+        <div class="content-header">
+          <div class="flex items-center justify-between w-full">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center">
+                <IconSafe class="text-green-500 text-xl" />
+              </div>
+              <div>
+                <h2 class="text-xl font-medium section-heading">客户端证书</h2>
+                <div class="section-subtitle text-sm">HTTPS 客户端证书（mTLS）</div>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <a-button type="primary" size="small" @click="clientCertPanel?.handleCreate?.()">
+                <template #icon><IconPlus /></template>
+                {{ actionText.addCertificate }}
+              </a-button>
+              <a-button type="outline" size="small" @click="activeTab = 'list'">
+                返回
+              </a-button>
+            </div>
+          </div>
+        </div>
+
+        <div class="content-body">
+          <ClientCertPanel ref="clientCertPanel" />
         </div>
       </div>
     </div>

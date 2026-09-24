@@ -979,7 +979,9 @@ class UiPublicDataViewSet(viewsets.ModelViewSet):
 
 class UiEnvironmentConfigViewSet(viewsets.ModelViewSet):
     """环境配置管理视图"""
-    queryset = UiEnvironmentConfig.objects.select_related('project', 'creator')
+    queryset = UiEnvironmentConfig.objects.select_related(
+        'project', 'creator', 'client_certificate'
+    )
     serializer_class = UiEnvironmentConfigSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = ['project', 'is_default']
@@ -1436,6 +1438,8 @@ def trigger_batch_execution(request):
         if isinstance(run_options, dict):
             run_options["headless"] = True
 
+        from client_certificates.services import build_env_client_cert_payload
+
         args = {
             'case_ids': case_ids,
             'actuator_id': actuator_id,
@@ -1445,6 +1449,8 @@ def trigger_batch_execution(request):
             'run_options': run_options or None,
             'effective_runtime': effective,
             'trigger_type': trigger_type,
+            # HTTPS 客户端证书随任务下发（口令明文仅走这条执行器通道）
+            'client_cert': build_env_client_cert_payload(env),
         }
 
         # 通过 WebSocket 发送给执行器

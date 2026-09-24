@@ -115,6 +115,15 @@ class Config(object):
         self.__config.verify = verify
         return self
 
+    def cert(self, cert) -> "Config":
+        """设置 HTTPS 客户端证书（requests 的 cert 参数）。
+
+        cert 可为 PEM 文件路径，或 (证书路径, 私钥路径) 二元组/list。
+        由 client_certificates.services.materialize_for_requests() 负责准备好材料。
+        """
+        self.__config.cert = cert
+        return self
+
     def export(self, *export_var_name: Text) -> "Config":
         self.__config.export.extend(export_var_name)
         self.__config.export = list(set(self.__config.export))

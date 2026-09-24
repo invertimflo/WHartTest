@@ -189,6 +189,10 @@ class PlaywrightExecutor:
         )
         # 本次任务推导出的 origin（由 set_task_origins 覆盖写入）
         self._task_cert_origins: list[str] = []
+        # 平台随证书下发的 origin（环境 base_url 等），由 prepare_task_origins 写入。
+        # 与 _task_cert_origins 分开保存，是为了让执行入口内部的 refresh_task_origins()
+        # 重新按 config 推导时不会把它们冲掉（下发的 origin 未必出现在 config 里）。
+        self._task_extra_origins: list[str] = []
         # 依赖缺失类告警只提示一次，避免刷日志
         self._cert_warned: set[str] = set()
         # 解析后的证书文件绝对路径（惰性计算）
@@ -233,6 +237,14 @@ class PlaywrightExecutor:
             "_runtime_viewport": getattr(self, "_runtime_viewport", None),
             "_viewport_explicit": getattr(self, "_viewport_explicit", False),
             "_auth_config": getattr(self, "_auth_config", None),
+            # 任务级 HTTPS 客户端证书 / 忽略证书校验开关的快照，供 restore 还原
+            "ignore_https_errors": self.ignore_https_errors,
+            "_client_cert_enabled": self._client_cert_enabled,
+            "_client_cert_pfx_path": self._client_cert_pfx_path,
+            "_client_cert_passphrase": self._client_cert_passphrase,
+            "_client_cert_cert_path": self._client_cert_cert_path,
+            "_client_cert_key_path": self._client_cert_key_path,
+            "_client_cert_origins": self._client_cert_origins,
         }
         if not runtime:
             return previous
@@ -274,6 +286,23 @@ class PlaywrightExecutor:
             # 任务级认证配置原样透传；None 表示无（恢复任务前状态由 restore 负责）
             self._auth_config = auth if isinstance(auth, dict) else None
 
+        # 忽略证书校验三态：None 保持 auto（沿用节点默认/证书推导），True/False 强制覆盖
+        if runtime.get("ignore_https_errors") is not None:
+            self.ignore_https_errors = bool(runtime["ignore_https_errors"])
+
+        # 任务级客户端证书：文件已由 consumer 下载为本地路径（详见 client_cert.py）
+        task_cert = runtime.get("client_cert")
+        if isinstance(task_cert, dict):
+            self.configure_client_cert(
+                enabled=True,
+                pfx_path=task_cert.get("pfx_path"),
+                passphrase=task_cert.get("passphrase"),
+                cert_path=task_cert.get("cert_path"),
+                key_path=task_cert.get("key_path"),
+                origins=task_cert.get("origins"),
+                reset_material=True,
+            )
+
         return previous
 
     def restore_runtime_options(self, previous: dict | None) -> None:
@@ -288,12 +317,27 @@ class PlaywrightExecutor:
         self._viewport_explicit = previous.get("_viewport_explicit", False)
         self._auth_config = previous.get("_auth_config")
 
+        # 还原节点级 HTTPS 配置，避免任务级证书"串"到下一个任务
+        self.ignore_https_errors = previous.get("ignore_https_errors")
+        self._client_cert_enabled = previous.get("_client_cert_enabled", False)
+        self._client_cert_pfx_path = previous.get("_client_cert_pfx_path")
+        self._client_cert_passphrase = previous.get("_client_cert_passphrase")
+        self._client_cert_cert_path = previous.get("_client_cert_cert_path")
+        self._client_cert_key_path = previous.get("_client_cert_key_path")
+        self._client_cert_origins = previous.get("_client_cert_origins")
+        # 证书材料可能已变化，作废解析缓存与告警去重记录
+        self._client_cert_resolved = None
+        self._cert_warned = set()
+        # 任务结束：连同平台随证书下发的 origin 一起清掉，避免残留到下一个任务
+        self.clear_task_origins()
+
     # ------------------------------------------------------------------
     # HTTPS 客户端证书
     #
     # Playwright 的 client_certificates 要求 origin 精确匹配
     # （https://host[:port]，不支持通配），因此这里分两步：
-    #   1. 任务开始时用 set_task_origins() 固定本次任务的 origin 集合
+    #   1. 任务开始时用 prepare_task_origins() 固定本次任务的 origin 集合
+    #      （执行入口内部再按 config 调 refresh_task_origins() 补齐推导结果）
     #   2. 建上下文时 _build_client_certificates() 把它和证书材料组装成 Playwright 参数
     # 详细约束见 client_cert.py 顶部说明。
     # ------------------------------------------------------------------
@@ -308,12 +352,24 @@ class PlaywrightExecutor:
         key_path: Optional[str] = None,
         origins: Optional[str] = None,
         config_dir: Optional[str] = None,
+        reset_material: bool = False,
     ) -> None:
         """配置或热更新客户端证书。
 
         仅更新显式传入（非 None）的字段，因此可安全地用于「平台只下发部分字段」的场景。
         ``passphrase`` 属敏感信息，只保存在内存中，不写入日志。
+
+        ``reset_material=True``：先清空全部证书材料再应用。任务级（环境）证书必须走这条
+        路径 —— 否则节点 config.toml 里遗留的 pfx 路径会与任务下发的 PEM 同时存在，
+        而 build_client_certificates() 的「pfx 优先」规则会把任务证书整个丢掉。
         """
+        if reset_material:
+            self._client_cert_pfx_path = None
+            self._client_cert_passphrase = None
+            self._client_cert_cert_path = None
+            self._client_cert_key_path = None
+            self._client_cert_origins = None
+
         if enabled is not None:
             self._client_cert_enabled = bool(enabled)
         if pfx_path is not None:
@@ -393,182 +449,41 @@ class PlaywrightExecutor:
             *[str(item) for item in origins if item]
         )
 
-    def _resolved_cert_files(self) -> dict:
-        """解析证书文件绝对路径（结果缓存，configure_client_cert 时作废）。"""
-        if self._client_cert_resolved is not None:
-            return self._client_cert_resolved
+    def clear_task_origins(self) -> None:
+        """清空本次任务的 origin 集合（含平台随证书下发的 origin）。
 
-        base_dir = self._client_cert_config_dir
-        self._client_cert_resolved = {
-            'pfx': client_cert.resolve_cert_path(self._client_cert_pfx_path, base_dir),
-            'cert': client_cert.resolve_cert_path(self._client_cert_cert_path, base_dir),
-            'key': client_cert.resolve_cert_path(self._client_cert_key_path, base_dir),
-        }
-        return self._client_cert_resolved
-
-    def _warn_cert_once(self, key: str, message: str) -> None:
-        """同一类证书告警只输出一次，避免每个上下文都刷屏。"""
-        if key in self._cert_warned:
-            return
-        self._cert_warned.add(key)
-        logger.warning(message)
-
-    def _build_client_certificates(self) -> list[dict]:
-        """构造 Playwright ``client_certificates`` 参数；不满足条件时返回 ``[]``。
-
-        注意：日志只输出指纹（证书路径 + origin），**绝不输出 passphrase**。
+        任务/批次结束时调用，避免上一个任务的 origin 残留到下一个任务。
         """
-        if not self._client_cert_enabled:
-            return []
+        self._task_extra_origins = []
+        self._task_cert_origins = []
 
-        resolved = self._resolved_cert_files()
-        pfx = resolved.get('pfx')
-        cert = resolved.get('cert')
-        key = resolved.get('key')
+    def prepare_task_origins(self, *configs, extra_origins=None) -> list[str]:
+        """按本次任务的配置固定 https origin 集合，返回最终生效的 origin 列表。
 
-        if pfx is None and (cert is None or key is None):
-            self._warn_cert_once(
-                'no-material',
-                "客户端证书已启用但未配置完整的证书文件"
-                "（需 client_cert_pfx_path，或 client_cert_cert_path + client_cert_key_path），"
-                "本次执行不启用客户端证书",
-            )
-            return []
-
-        for warning in client_cert.validate_cert_files(pfx_path=pfx, cert_path=cert, key_path=key):
-            self._warn_cert_once(f'file:{warning}', f"客户端证书配置告警：{warning}")
-
-        origins = self._task_cert_origins or client_cert.parse_origins(self._client_cert_origins)
-        if not origins:
-            self._warn_cert_once(
-                'no-origin',
-                "客户端证书已启用但未能推导出 https origin（任务的 base_url / page_url 均非 https，"
-                "且未配置 client_cert_origins）；Playwright 要求 origin 精确匹配且不支持通配，"
-                "本次执行不启用客户端证书",
-            )
-            return []
-
-        fingerprint = (str(pfx), str(cert), str(key), tuple(origins))
-        if fingerprint != self._client_cert_logged:
-            self._client_cert_logged = fingerprint
-            logger.info(
-                "HTTPS 客户端证书已启用，生效 origin：%s（证书文件：%s）",
-                client_cert.summarize_origins(origins),
-                pfx or cert,
-            )
-
-        return client_cert.build_client_certificates(
-            origins,
-            pfx_path=pfx,
-            passphrase=self._client_cert_passphrase,
-            cert_path=cert,
-            key_path=key,
-        )
-
-    # ------------------------------------------------------------------
-    # HTTPS 客户端证书
-    #
-    # Playwright 的 client_certificates 要求 origin 精确匹配
-    # （https://host[:port]，不支持通配），因此这里分两步：
-    #   1. 任务开始时用 set_task_origins() 固定本次任务的 origin 集合
-    #   2. 建上下文时 _build_client_certificates() 把它和证书材料组装成 Playwright 参数
-    # 详细约束见 client_cert.py 顶部说明。
-    # ------------------------------------------------------------------
-
-    def configure_client_cert(
-        self,
-        *,
-        enabled: Optional[bool] = None,
-        pfx_path: Optional[str] = None,
-        passphrase: Optional[str] = None,
-        cert_path: Optional[str] = None,
-        key_path: Optional[str] = None,
-        origins: Optional[str] = None,
-        config_dir: Optional[str] = None,
-    ) -> None:
-        """配置或热更新客户端证书。
-
-        仅更新显式传入（非 None）的字段，因此可安全地用于「平台只下发部分字段」的场景。
-        ``passphrase`` 属敏感信息，只保存在内存中，不写入日志。
+        每个执行入口在任务开始时调用一次（覆盖式写入）。origin 来源：
+          - 任务配置里的 env_config.base_url / page_url / 各组页面步骤 URL
+          - 节点级 client_cert_origins（由 _task_origins 自动并入）
+          - extra_origins：平台随证书下发的 origin（环境 base_url），会被记住并在
+            后续 refresh_task_origins() 中持续生效
+        Playwright 的 client_certificates 要求 origin 精确匹配且不支持通配，
+        因此推导不出 origin 时宁可让证书不生效，也不传非法参数。
         """
-        if enabled is not None:
-            self._client_cert_enabled = bool(enabled)
-        if pfx_path is not None:
-            self._client_cert_pfx_path = pfx_path or None
-        if passphrase is not None:
-            self._client_cert_passphrase = passphrase or None
-        if cert_path is not None:
-            self._client_cert_cert_path = cert_path or None
-        if key_path is not None:
-            self._client_cert_key_path = key_path or None
-        if origins is not None:
-            self._client_cert_origins = origins or None
-        if config_dir is not None:
-            self._client_cert_config_dir = Path(config_dir) if config_dir else None
+        # 任务起点：extra_origins 显式覆盖（None 即清空），不沿用上一个任务
+        self._task_extra_origins = client_cert.parse_origins(*(extra_origins or []))
+        return self.refresh_task_origins(*configs)
 
-        # 证书材料可能有变化，作废缓存与告警去重记录，让下一次建上下文重新评估
-        self._client_cert_resolved = None
-        self._cert_warned = set()
+    def refresh_task_origins(self, *configs) -> list[str]:
+        """按 config 重新推导 origin，并保留平台随证书下发的 origin。
 
-    def _task_origins(self, *configs) -> list[str]:
-        """从任务配置推导出需要匹配的 https origin 集合。
-
-        来源：``env_config['base_url']``、``page_url``（用例级与页面步骤级），
-        再追加配置里的额外 origin 列表（``client_cert_origins``）。
-        非 https 与无法解析的项会被丢弃 —— Playwright 不支持通配，只能精确匹配。
+        执行入口内部（真正建上下文之前）调用：此时才能拿到最新 config，但
+        _task_extra_origins 仍需保住，否则平台下发而 config 中不存在的 origin 会丢。
         """
-        candidates: list[str] = []
-
-        for config in configs:
-            if config is None:
-                continue
-            if isinstance(config, str):
-                candidates.append(config)
-                continue
-
-            env_config = getattr(config, 'env_config', None)
-            if isinstance(env_config, dict):
-                for key in ('base_url', 'page_url'):
-                    value = env_config.get(key)
-                    if value:
-                        candidates.append(str(value))
-
-            page_url = getattr(config, 'page_url', None)
-            if page_url:
-                candidates.append(str(page_url))
-
-            for page_step in getattr(config, 'page_steps', None) or []:
-                step_env = getattr(page_step, 'env_config', None)
-                if isinstance(step_env, dict):
-                    for key in ('base_url', 'page_url'):
-                        value = step_env.get(key)
-                        if value:
-                            candidates.append(str(value))
-                step_url = getattr(page_step, 'page_url', None)
-                if step_url:
-                    candidates.append(str(step_url))
-
-        origins = client_cert.parse_origins(*candidates)
-        for extra in client_cert.parse_origins(self._client_cert_origins):
-            if extra not in origins:
-                origins.append(extra)
-
-        return origins
-
-    def set_task_origins(self, origins) -> None:
-        """覆盖式设置本次任务的 origin 集合。
-
-        覆盖而非合并是刻意的：每个执行入口都会在开头调用本方法，因此不存在
-        「上一个任务的 origin 污染下一个任务」的可能，异常返回路径也无需额外清理。
-        """
-        if not origins:
-            self._task_cert_origins = []
-            return
-        if isinstance(origins, str):
-            origins = [origins]
-        self._task_cert_origins = client_cert.parse_origins(
-            *[str(item) for item in origins if item]
-        )
+        origins = self._task_origins(*configs)
+        for origin in self._task_extra_origins:
+            if origin not in origins:
+                origins.append(origin)
+        self.set_task_origins(origins)
+        return self._task_cert_origins
 
     def _resolved_cert_files(self) -> dict:
         """解析证书文件绝对路径（结果缓存，configure_client_cert 时作废）。"""
@@ -1935,7 +1850,8 @@ class PlaywrightExecutor:
         
         try:
             # 先固定本次任务的 origin，供 HTTPS 客户端证书精确匹配
-            self.set_task_origins(self._task_origins(config))
+            # （refresh 而非 set：保住平台随证书下发的 origin）
+            self.refresh_task_origins(config)
             # 使用带 trace 的浏览器会话
             async with self.browser_session_with_trace(trace_name) as page:
                 self._page = page
@@ -2128,7 +2044,8 @@ class PlaywrightExecutor:
 
         try:
             # 先固定本次任务的 origin，供 HTTPS 客户端证书精确匹配
-            self.set_task_origins(self._task_origins(config))
+            # （refresh 而非 set：保住平台随证书下发的 origin）
+            self.refresh_task_origins(config)
             async with self.browser_session() as page:
                 logger.info(f"开始执行页面步骤: {config.page_name}")
                 self._page_errors = []
@@ -2425,7 +2342,8 @@ class PlaywrightExecutor:
 
         # 批量用例共用一个 context 选项，因此这里取全部用例 origin 的并集，
         # 一次性覆盖所有需要的客户端证书 origin（无需改成 per-case 选项）
-        self.set_task_origins(self._task_origins(*configs))
+        # （refresh 而非 set：保住平台随证书下发的 origin）
+        self.refresh_task_origins(*configs)
 
         # 确保浏览器已初始化（非持久化模式）
         if self._playwright is None:
@@ -2497,6 +2415,6 @@ class PlaywrightExecutor:
             self._context = None
             self._page = None
             self._page_errors = []
-            # 批次结束，清掉本批次累积的 origin，避免影响后续任务
-            self.set_task_origins([])
+            # 批次结束，清掉本批次累积的 origin（含平台下发的），避免影响后续任务
+            self.clear_task_origins()
             self._release_memory()

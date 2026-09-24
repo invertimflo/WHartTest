@@ -74,6 +74,7 @@ class FileReference(models.Model):
     REF_UI_TESTCASE = 'ui_testcase'
     REF_UI_PAGE_STEPS = 'ui_page_steps'
     REF_LLM_CHAT = 'llm_chat'
+    REF_CLIENT_CERT = 'client_cert'
     REF_CHOICES = [
         (REF_API_INTERFACE, '接口'),
         (REF_API_TESTCASE, '测试用例'),
@@ -81,6 +82,7 @@ class FileReference(models.Model):
         (REF_UI_TESTCASE, 'UI用例'),
         (REF_UI_PAGE_STEPS, 'UI页面步骤'),
         (REF_LLM_CHAT, 'LLM对话'),
+        (REF_CLIENT_CERT, '客户端证书'),
     ]
 
     file = models.ForeignKey(FileAsset, on_delete=models.CASCADE, related_name='references')

@@ -28,6 +28,8 @@ SOURCE_ENV = "env"
 SOURCE_ACTUATOR = "actuator_default"
 SOURCE_HARD = "hard_default"
 SOURCE_FORCED = "forced_by_runtime"
+# ignore_https_errors 未在任何层显式配置时为 auto（由执行器按 stealth/证书推导）
+SOURCE_AUTO = "auto"
 
 RUNTIME_BROWSER_KEYS = (
     "browser",
@@ -36,6 +38,10 @@ RUNTIME_BROWSER_KEYS = (
     "viewport_height",
     "timeout",
 )
+
+# 三态布尔：None 表示"未设置/自动"，因此刻意不放进 RUNTIME_BROWSER_KEYS
+# （那套合并逻辑会硬编码 hard default，把 auto 变成确定值）。
+IGNORE_HTTPS_ERRORS_KEY = "ignore_https_errors"
 
 
 class RuntimeConfigError(ValueError):
@@ -158,6 +164,11 @@ def normalize_run_options(run_options: Optional[dict[str, Any]]) -> dict[str, An
             raise RuntimeConfigError("invalid timeout in run_options")
         if timeout is not None:
             normalized["timeout"] = timeout
+    if IGNORE_HTTPS_ERRORS_KEY in run_options:
+        # 只接受显式布尔；null/缺省一律视为"未指定"，让环境配置或节点默认接管
+        ignore_https_errors = normalize_bool(run_options.get(IGNORE_HTTPS_ERRORS_KEY))
+        if ignore_https_errors is not None:
+            normalized[IGNORE_HTTPS_ERRORS_KEY] = ignore_https_errors
     return normalized
 
 
@@ -187,6 +198,11 @@ def extract_env_policy(env_config: Optional[Any]) -> dict[str, Any]:
     timeout = normalize_timeout_ms(_get("timeout"), unit_hint="ms")
     if timeout is not None:
         policy["timeout"] = timeout
+
+    # 三态：None(未设置/auto) 不写入 policy，交由上层保持 auto 语义
+    ignore_https_errors = normalize_bool(_get(IGNORE_HTTPS_ERRORS_KEY))
+    if ignore_https_errors is not None:
+        policy[IGNORE_HTTPS_ERRORS_KEY] = ignore_https_errors
     return policy
 
 
@@ -332,6 +348,20 @@ def resolve_effective_runtime(
         or source.get("viewport_height") in {SOURCE_RUN, SOURCE_ENV}
     )
 
+    # ignore_https_errors 是三态（None = auto），无 actuator/hard 默认可回落：
+    # run_options > env > auto。auto 时把 None 交给执行器，由 stealth/证书推导，
+    # 从而保持既有部署的行为不变。
+    if IGNORE_HTTPS_ERRORS_KEY in options:
+        ignore_https_errors = options[IGNORE_HTTPS_ERRORS_KEY]
+        ignore_source = SOURCE_RUN
+    elif IGNORE_HTTPS_ERRORS_KEY in policy:
+        ignore_https_errors = policy[IGNORE_HTTPS_ERRORS_KEY]
+        ignore_source = SOURCE_ENV
+    else:
+        ignore_https_errors = None
+        ignore_source = SOURCE_AUTO
+    source[IGNORE_HTTPS_ERRORS_KEY] = ignore_source
+
     return {
         "env_config_id": env_config_id,
         "env_name": env_name,
@@ -341,6 +371,7 @@ def resolve_effective_runtime(
         "viewport_width": int(effective["viewport_width"]),
         "viewport_height": int(effective["viewport_height"]),
         "timeout": int(effective["timeout"]),
+        IGNORE_HTTPS_ERRORS_KEY: ignore_https_errors,
         "db": db or {},
         "actuator_id": actuator_id,
         "actuator_name": actuator_name,
@@ -372,6 +403,7 @@ def env_model_to_policy_dict(env) -> dict[str, Any]:
         "viewport_width": getattr(env, "viewport_width", None),
         "viewport_height": getattr(env, "viewport_height", None),
         "timeout": getattr(env, "timeout", None),
+        IGNORE_HTTPS_ERRORS_KEY: getattr(env, IGNORE_HTTPS_ERRORS_KEY, None),
         "extra_config": getattr(env, "extra_config", None),
         "db": db,
         "db_type": db["db_type"],
@@ -544,6 +576,7 @@ def public_effective_runtime(effective: Optional[dict[str, Any]]) -> dict[str, A
         "viewport_width": effective.get("viewport_width"),
         "viewport_height": effective.get("viewport_height"),
         "timeout": effective.get("timeout"),
+        IGNORE_HTTPS_ERRORS_KEY: effective.get(IGNORE_HTTPS_ERRORS_KEY),
         "actuator_id": effective.get("actuator_id"),
         "actuator_name": effective.get("actuator_name"),
         "source": effective.get("source") or {},
@@ -564,6 +597,7 @@ def build_environment_snapshot(effective: dict[str, Any]) -> dict[str, Any]:
         "viewport_width": effective.get("viewport_width"),
         "viewport_height": effective.get("viewport_height"),
         "timeout": effective.get("timeout"),
+        IGNORE_HTTPS_ERRORS_KEY: effective.get(IGNORE_HTTPS_ERRORS_KEY),
         "actuator_id": effective.get("actuator_id"),
         "actuator_name": effective.get("actuator_name"),
         "source": effective.get("source") or {},

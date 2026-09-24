@@ -166,28 +166,17 @@ class ApiTestTaskExecutionService:
 
         execution.start()
 
-        # Get environment configuration
+        # Get environment configuration（统一走 build_environment_payload，含证书）
         environment = None
         if execution.environment:
             try:
-                env = execution.environment
-                env_variables = env.get_all_variables()
-                if isinstance(env_variables, str):
-                    try:
-                        import json
-                        env_variables = json.loads(env_variables)
-                    except (json.JSONDecodeError, ValueError):
-                        env_variables = {}
-                elif not isinstance(env_variables, dict):
-                    env_variables = {}
+                from api_environments.services import build_environment_payload
 
-                environment = {
-                    'id': env.id,
-                    'name': env.name,
-                    'base_url': env.base_url,
-                    'variables': env_variables,
-                    'verify_ssl': env.verify_ssl
-                }
+                environment = build_environment_payload(execution.environment)
+                if environment is not None:
+                    env_variables = environment.get('variables')
+                    if not isinstance(env_variables, dict):
+                        environment['variables'] = {}
             except Exception as e:
                 logger.error(f"Error getting environment info: {str(e)}")
                 environment = None

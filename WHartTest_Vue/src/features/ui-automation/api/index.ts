@@ -27,6 +27,7 @@ import type {
   UiEnvironmentConfigForm,
   UiAuthState,
   UiAuthStateForm,
+  UiClientCertificate,
   PaginatedResponse,
   TraceData,
 } from '../types'
@@ -225,6 +226,17 @@ export const envConfigApi = {
     request.patch<UiEnvironmentConfig>(`${BASE_URL}/env-configs/${id}/`, data),
 
   delete: (id: number) => request.delete(`${BASE_URL}/env-configs/${id}/`),
+}
+
+// ==================== 客户端证书（项目级资源） ====================
+// 证书以项目维度管理（/api/projects/{project}/client-certificates/），
+// 与接口自动化共用同一份数据；此处仅供 UI 环境表单做引用选择。
+export const clientCertificateApi = {
+  list: (projectId: number, params?: { is_active?: boolean; cert_type?: string; search?: string }) =>
+    request.get<PaginatedResponse<UiClientCertificate>>(
+      `/projects/${projectId}/client-certificates/`,
+      { params },
+    ),
 }
 
 // ==================== 环境登录态管理 ====================

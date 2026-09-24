@@ -326,14 +326,13 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         if environment_id is not None:
             try:
                 from api_environments.models import ApiEnvironment
+                from api_environments.services import (
+                    build_environment_payload,
+                    public_environment_payload,
+                )
                 project_pk = self.kwargs.get('project_pk')
                 env = ApiEnvironment.objects.get(id=environment_id, project_id=project_pk)
-                environment_config = {
-                    'id': env.id,
-                    'base_url': env.base_url,
-                    'verify_ssl': env.verify_ssl,
-                    'variables': env.get_all_variables()
-                }
+                environment_config = build_environment_payload(env)
             except Exception:
                 return Response(
                     {'detail': f'Environment ID {environment_id} not found'},
@@ -354,7 +353,7 @@ class ApiTestCaseViewSet(BaseModelViewSet):
                 'fail_count': report.fail_count,
                 'error_count': report.error_count,
                 'duration': report.duration,
-                'config': environment_config
+                'config': public_environment_payload(environment_config)
             })
 
         except Exception as e:
@@ -379,13 +378,12 @@ class ApiTestCaseViewSet(BaseModelViewSet):
         if environment_id is not None:
             try:
                 from api_environments.models import ApiEnvironment
+                from api_environments.services import (
+                    build_environment_payload,
+                    public_environment_payload,
+                )
                 env = ApiEnvironment.objects.get(id=environment_id, project_id=project_pk)
-                environment_config = {
-                    'id': env.id,
-                    'base_url': env.base_url,
-                    'verify_ssl': env.verify_ssl,
-                    'variables': env.get_all_variables()
-                }
+                environment_config = build_environment_payload(env)
             except Exception:
                 return Response(
                     {'detail': f'Environment ID {environment_id} not found'},
@@ -405,7 +403,7 @@ class ApiTestCaseViewSet(BaseModelViewSet):
             return Response({
                 'statistics': statistics,
                 'report_ids': [report.id for report in reports],
-                'config': environment_config
+                'config': public_environment_payload(environment_config)
             })
 
         except Exception as e:
@@ -756,14 +754,13 @@ class ApiInterfaceCaseViewSet(BaseModelViewSet):
         if environment_id is not None:
             try:
                 from api_environments.models import ApiEnvironment
+                from api_environments.services import (
+                    build_environment_payload,
+                    public_environment_payload,
+                )
                 project_pk = self.kwargs.get('project_pk')
                 env = ApiEnvironment.objects.get(id=environment_id, project_id=project_pk)
-                environment_config = {
-                    'id': env.id,
-                    'base_url': env.base_url,
-                    'verify_ssl': env.verify_ssl,
-                    'variables': env.get_all_variables()
-                }
+                environment_config = build_environment_payload(env)
                 db_config = env.get_database_config()
                 if db_config:
                     environment_config['db_config'] = _database_config_payload(db_config)
@@ -791,7 +788,7 @@ class ApiInterfaceCaseViewSet(BaseModelViewSet):
                 'fail_count': report.fail_count,
                 'error_count': report.error_count,
                 'duration': report.duration,
-                'config': environment_config,
+                'config': public_environment_payload(environment_config),
                 'extract_persistence': extract_persistence,
             })
 

@@ -12,6 +12,10 @@ FunctionsMapping = Dict[Text, Callable]
 Headers = Dict[Text, Text]
 Cookies = Dict[Text, Text]
 Verify = bool
+# requests 的 cert 参数：PEM 路径，或 (证书路径, 私钥路径) 二元组。
+# 这里刻意用 Any 而非严格类型：HTTP 用例经 JSON 序列化后元组会退化成 list，
+# requests 两者都能接受，过度约束反而会在反序列化后报错。
+Cert = Any
 Hooks = List[Union[Text, Dict[Text, Text]]]
 Export = List[Text]
 Validators = List[Dict]
@@ -117,6 +121,8 @@ class TSqlRequest(BaseModel):
 class TConfig(BaseModel):
     name: Name
     verify: Verify = False
+    # HTTPS 客户端证书（mTLS）：见 client_certificates app 与 step_request 注入点
+    cert: Cert = None
     base_url: BaseUrl = ""
     # Text: prepare variables in debugtalk.py, ${gen_variables()}
     variables: Union[VariablesMapping, Text] = {}
@@ -143,6 +149,7 @@ class TRequest(BaseModel):
     timeout: float = 120
     allow_redirects: bool = True
     verify: Verify = False
+    cert: Cert = None  # HTTPS 客户端证书（mTLS）
     upload: Dict = {}  # used for upload files
 
 

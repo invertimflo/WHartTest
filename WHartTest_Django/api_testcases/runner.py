@@ -558,6 +558,19 @@ class TestCaseRunner(HttpRunner):
                     verify_value,
                 )
 
+            # HTTPS 客户端证书（mTLS）：环境已由
+            # api_environments.services.build_environment_payload() 准备好
+            # requests 可用的材料；这里只做透传，不再关心 PEM/pfx 差异。
+            client_cert = environment.get('client_cert')
+            if client_cert:
+                self.config.cert(client_cert)
+                logger.info(
+                    "Using environment client certificate: trace_id=%s testcase_id=%s cert=%s",
+                    self.trace_id,
+                    self.testcase.id,
+                    client_cert,
+                )
+
             if environment.get('variables'):
                 env_variables = environment.get('variables', {})
                 if not isinstance(env_variables, dict):

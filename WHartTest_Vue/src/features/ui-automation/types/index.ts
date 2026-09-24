@@ -348,6 +348,29 @@ export interface UiPublicData extends TimeStampFields {
 /** 浏览器类型 */
 export type BrowserType = 'chromium' | 'firefox' | 'webkit'
 
+/** 客户端证书形态：PEM（证书+私钥两文件） / PKCS#12（.pfx/.p12 单文件） */
+export type ClientCertType = 'pem' | 'pkcs12'
+
+/** 客户端证书（项目级资源，接口/UI 自动化共用） */
+export interface UiClientCertificate {
+  id: number
+  name: string
+  project: number
+  cert_type: ClientCertType
+  has_passphrase: boolean
+  is_active: boolean
+  description?: string
+}
+
+/** 环境上绑定的客户端证书摘要（绝不含口令明文） */
+export interface UiClientCertBrief {
+  id: number
+  name: string
+  cert_type: ClientCertType
+  has_passphrase: boolean
+  is_active: boolean
+}
+
 /** 环境配置 */
 export interface UiEnvironmentConfig extends TimeStampFields {
   id: number
@@ -359,6 +382,11 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   db_type: 'mysql'
   mysql_config?: Record<string, unknown>
   extra_config?: Record<string, unknown>
+  /** HTTPS 客户端证书（mTLS）引用，可为空 */
+  client_certificate?: number | null
+  client_cert_info?: UiClientCertBrief | null
+  /** 忽略证书校验三态：null=自动（默认） / true=忽略 / false=严格校验 */
+  ignore_https_errors?: boolean | null
   is_default: boolean
   creator: number | null
   creator_name?: string

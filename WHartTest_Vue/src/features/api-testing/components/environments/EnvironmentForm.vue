@@ -3,6 +3,7 @@ import { ref, onMounted, computed, watch, onBeforeMount } from 'vue'
 import type { Environment, EnvironmentVariable, CreateEnvironmentVariableData, NewEnvironmentVariableData, VariableType } from '../../services/environmentService'
 import { deleteEnvironmentVariable, createEnvironmentVariable, updateEnvironmentVariable, VARIABLE_TYPES } from '../../services/environmentService'
 import { getDatabaseConfigs, type DatabaseConfig } from '../../services/databaseConfigService'
+import { getClientCertificates, type ClientCertificate } from '../../services/clientCertificateService'
 import { toArray } from '../../services/responseHelpers'
 import { Message } from '@arco-design/web-vue'
 import {
@@ -14,7 +15,8 @@ import {
   IconLink,
   IconCode,
   IconLock,
-  IconRefresh
+  IconRefresh,
+  IconSafe
 } from '@arco-design/web-vue/es/icon'
 import EnvironmentVariableForm from './EnvironmentVariableForm.vue'
 import EnvironmentVariableList from './EnvironmentVariableList.vue'
@@ -34,6 +36,7 @@ interface Props {
     is_active: boolean
     variables: EnvironmentVariable[]
     database_config?: number | null
+    client_certificate?: number | null
     verify_ssl?: boolean
   }
 }
@@ -61,6 +64,12 @@ const formText = computed(() => isEnglish.value
       guideLine2: 'Both variable name and value are required',
       guideLine3: 'Link a database config to access it in test cases',
       databaseConfigId: 'Database Config ID',
+      clientCertificateLabel: 'Client Certificate',
+      clientCertificatePlaceholder: 'Select an HTTPS client certificate (mTLS)',
+      noLinkedCertificate: 'No client certificate',
+      loadingClientCertificates: 'Loading client certificates...',
+      noClientCertificates: 'No client certificates',
+      disabledSuffix: '(disabled)',
     }
   : {
       loadingDatabaseConfigs: '正在加载数据库配置...',
@@ -73,6 +82,12 @@ const formText = computed(() => isEnglish.value
       guideLine2: '变量名和变量值都是必填项',
       guideLine3: '关联数据库配置后，您可以在测试用例中访问该数据库',
       databaseConfigId: '数据库配置 ID',
+      clientCertificateLabel: '关联客户端证书',
+      clientCertificatePlaceholder: '请选择 HTTPS 客户端证书（mTLS）',
+      noLinkedCertificate: '不关联客户端证书',
+      loadingClientCertificates: '正在加载客户端证书...',
+      noClientCertificates: '无客户端证书',
+      disabledSuffix: '(已禁用)',
     }
 )
 
@@ -135,6 +150,38 @@ const editingVariableIndex = ref(-1)
 const databaseConfigs = ref<DatabaseConfig[]>([])
 const loadingDatabaseConfigs = ref(false)
 const forceRefresh = ref(false)
+
+// HTTPS 客户端证书（mTLS）：环境级引用，供接口自动化在需要客户端证书的站点上使用
+const clientCertificates = ref<ClientCertificate[]>([])
+const loadingClientCertificates = ref(false)
+
+const fetchClientCertificates = async () => {
+  const projectId = props.modelValue.project || Number(projectStore.currentProjectId)
+  if (!projectId) return
+  try {
+    loadingClientCertificates.value = true
+    const response = await getClientCertificates(projectId)
+    clientCertificates.value = toArray<any>(response.data?.results ?? response.data).map((item: any) => ({
+      id: item.id,
+      name: item.name,
+      cert_type: item.cert_type,
+      has_passphrase: item.has_passphrase,
+      is_active: item.is_active !== false,
+    } as ClientCertificate))
+  } catch (error) {
+    console.error('获取客户端证书列表失败', error)
+    clientCertificates.value = []
+  } finally {
+    loadingClientCertificates.value = false
+  }
+}
+
+// 清除证书引用（后端把空值视为"不关联"）
+const handleClearClientCertificate = () => {
+  const updatedModel = { ...props.modelValue }
+  updatedModel.client_certificate = null
+  emit('update:modelValue', updatedModel)
+}
 
 // 获取数据库配置列表
 const fetchDatabaseConfigs = async () => {
@@ -277,6 +324,11 @@ onMounted(async () => {
   const projectId = props.modelValue.project || Number(projectStore.currentProjectId)
   
   console.log('[onMounted] 组件挂载，模式:', props.mode, '项目ID:', projectId, '数据库配置:', props.modelValue.database_config)
+
+  // 客户端证书列表与模式无关：创建/编辑都需要下拉选项
+  if (projectId) {
+    fetchClientCertificates()
+  }
   
   // 只在编辑模式下预加载数据库配置，用于初始回显
   if (projectId && props.mode === 'edit') {
@@ -676,6 +728,42 @@ const handleSubmit = async () => {
                       >
                         {{ config.name }} 
                         <span v-if="!config.is_active" class="text-xs text-red-400">(已禁用)</span>
+                      </a-option>
+                    </template>
+                  </a-select>
+                </a-form-item>
+
+                <!-- HTTPS 客户端证书选择器 -->
+                <a-form-item field="client_certificate" :label="formText.clientCertificateLabel" class="!mb-0">
+                  <a-select
+                    v-model="modelValue.client_certificate"
+                    :placeholder="formText.clientCertificatePlaceholder"
+                    allow-clear
+                    :loading="loadingClientCertificates"
+                    class="field-control"
+                    @clear="handleClearClientCertificate"
+                  >
+                    <template #prefix>
+                      <icon-safe class="text-indigo-400" />
+                    </template>
+                    <template #empty>
+                      <div class="text-center p-2 form-text-subtle">
+                        {{ loadingClientCertificates ? formText.loadingClientCertificates : formText.noClientCertificates }}
+                      </div>
+                    </template>
+                    <a-option :value="null" :label="formText.noLinkedCertificate">{{ formText.noLinkedCertificate }}</a-option>
+
+                    <template v-if="clientCertificates.length > 0">
+                      <a-option
+                        v-for="cert in clientCertificates"
+                        :key="cert.id"
+                        :value="cert.id"
+                        :label="cert.name"
+                        :disabled="!cert.is_active"
+                      >
+                        {{ cert.name }}
+                        <span v-if="!cert.is_active" class="text-xs text-red-400">{{ formText.disabledSuffix }}</span>
+                        <span v-else-if="cert.has_passphrase" class="text-xs form-text-subtle"> (有口令)</span>
                       </a-option>
                     </template>
                   </a-select>

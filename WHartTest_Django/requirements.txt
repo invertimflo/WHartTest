@@ -285,6 +285,12 @@ uvicorn[standard]==0.34.0
 # https://github.com/encode/httpx/blob/master/LICENSE.md
 httpx==0.28.1
 
+# 加密库 - Apache 2.0/BSD 双许可证
+# https://github.com/pyca/cryptography/blob/main/LICENSE
+# 用途：HTTPS 客户端证书口令的 Fernet 加解密，以及 PKCS#12(.pfx/.p12) 与
+# 带口令 PEM 私钥向 requests 可用格式的转换（见 client_certificates app）。
+cryptography>=42.0.0
+
 # Pytest测试框架 - MIT许可证 (用于自动化脚本执行)
 # https://github.com/pytest-dev/pytest/blob/main/LICENSE
 pytest>=8.0.0

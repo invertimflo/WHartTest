@@ -669,6 +669,8 @@ class TaskConsumer:
             "viewport_width": effective.get("viewport_width"),
             "viewport_height": effective.get("viewport_height"),
             "viewport_explicit": effective.get("viewport_explicit", False),
+            # 三态：None = 保持 auto（由执行器按 stealth/证书推导）
+            "ignore_https_errors": effective.get("ignore_https_errors"),
         }
         if args:
             if "auth" in args:
@@ -677,7 +679,91 @@ class TaskConsumer:
             else:
                 # 未指定时按环境配置自动拉取平台保存的生效登录态
                 opts["auth"] = await self._resolve_auth(args.get("env_config_id"), args.get("auth_state_id"))
+
+            # 环境级 HTTPS 客户端证书：下载证书文件到本地缓存后交给执行器
+            task_cert = await self._resolve_task_client_cert(args)
+            if task_cert:
+                opts["client_cert"] = task_cert
         return opts
+
+    # ------------------------------------------------------------------
+    # HTTPS 客户端证书（环境级）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _client_cert_task_origins(args: dict | None) -> list:
+        """平台随证书下发的 origin（环境 base_url）。"""
+        payload = (args or {}).get("client_cert")
+        if not isinstance(payload, dict):
+            return []
+        value = payload.get("origins")
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value if item]
+        if isinstance(value, str) and value:
+            return [value]
+        return []
+
+    async def _resolve_task_client_cert(self, args: dict | None) -> Optional[dict]:
+        """下载任务携带的证书文件，返回执行器可直接使用的证书参数。
+
+        复用 _download_managed_file()：它自带 Bearer 认证、401 自动刷新、
+        sha256/size 校验、本地缓存复用与同源校验（拒绝跟随跨域重定向）。
+        任一文件下载/校验失败都退化为「本次不启用客户端证书」，不阻断任务。
+
+        注意：Playwright 只在 pfx 方案下使用 passphrase，PEM（certPath/keyPath）
+        分支不接受口令，因此 PEM 类型下不下发口令。
+        """
+        payload = (args or {}).get("client_cert")
+        if not isinstance(payload, dict):
+            return None
+
+        cert_type = payload.get("cert_type")
+        cert_file = payload.get("cert_file") or {}
+        key_file = payload.get("key_file") or {}
+
+        try:
+            if cert_type == "pkcs12":
+                pfx_path = await self._download_managed_file(
+                    file_id=cert_file.get("file_id"),
+                    project_id=cert_file.get("project_id"),
+                    download_url=cert_file.get("download_url"),
+                    file_name=cert_file.get("name"),
+                    file_sha=cert_file.get("sha256"),
+                    file_size=cert_file.get("size"),
+                )
+                return {
+                    "pfx_path": pfx_path,
+                    "passphrase": payload.get("passphrase") or None,
+                    "origins": payload.get("origins") or None,
+                }
+
+            cert_path = await self._download_managed_file(
+                file_id=cert_file.get("file_id"),
+                project_id=cert_file.get("project_id"),
+                download_url=cert_file.get("download_url"),
+                file_name=cert_file.get("name"),
+                file_sha=cert_file.get("sha256"),
+                file_size=cert_file.get("size"),
+            )
+            result = {
+                "cert_path": cert_path,
+                "origins": payload.get("origins") or None,
+            }
+            if key_file.get("file_id"):
+                result["key_path"] = await self._download_managed_file(
+                    file_id=key_file.get("file_id"),
+                    project_id=key_file.get("project_id"),
+                    download_url=key_file.get("download_url"),
+                    file_name=key_file.get("name"),
+                    file_sha=key_file.get("sha256"),
+                    file_size=key_file.get("size"),
+                )
+            if payload.get("has_passphrase") and not payload.get("passphrase"):
+                logger.warning("客户端证书口令未被平台下发，UI 自动化无法使用带口令的 PEM 私钥")
+            return result
+        except Exception as exc:
+            logger.warning(f"下载客户端证书文件失败，本次不启用客户端证书: {exc}")
+            return None
 
     # ------------------------------------------------------------------
     # 执行画面帧推流（仅单用例/单页面步骤执行挂载；批量执行不挂载）
@@ -780,6 +866,12 @@ class TaskConsumer:
         summary_result = None
         start_time = time.time()
         effective = self._resolve_task_runtime(args, env_config)
+        # 固定本次任务的 HTTPS 客户端证书 origin（含平台随证书下发的环境 base_url），
+        # 供执行器建上下文时与证书材料组装成 Playwright client_certificates
+        self.executor.prepare_task_origins(
+            config,
+            extra_origins=self._client_cert_task_origins(args),
+        )
         runtime_opts = await self._runtime_for_executor(effective, args)
         previous = self.executor.apply_runtime_options(runtime_opts)
         logger.info(f"runtime options: {runtime_opts}")
@@ -917,6 +1009,11 @@ class TaskConsumer:
 
         # 执行
         effective = self._resolve_task_runtime(args, env_config)
+        # 固定本次任务的 HTTPS 客户端证书 origin（含平台随证书下发的环境 base_url）
+        self.executor.prepare_task_origins(
+            config,
+            extra_origins=self._client_cert_task_origins(args),
+        )
         runtime_opts = await self._runtime_for_executor(effective, args)
         previous = self.executor.apply_runtime_options(runtime_opts)
         logger.info(
@@ -1095,6 +1192,11 @@ class TaskConsumer:
 
         # 并发执行
         effective = self._resolve_task_runtime(args, configs[0].env_config if configs else None)
+        # 批量执行共用一个 context，这里一次性把全部用例 + 平台下发 origin 固定下来
+        self.executor.prepare_task_origins(
+            *configs,
+            extra_origins=self._client_cert_task_origins(args),
+        )
         runtime_opts = await self._runtime_for_executor(effective, args)
         previous = self.executor.apply_runtime_options(runtime_opts)
         logger.info(f"batch runtime options: {runtime_opts}")

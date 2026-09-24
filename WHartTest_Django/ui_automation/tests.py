@@ -1,8 +1,13 @@
+import shutil
+import tempfile
+
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework import status
+from client_certificates.models import ClientCertificate
+from client_certificates.services import build_env_client_cert_payload
 from projects.models import Project, ProjectMember
 from ui_automation.models import (
     UiCaseStepsDetailed,
@@ -715,3 +720,211 @@ class UiCaptchaRecognizeTests(TestCase):
         )
         self.assertEqual(res_ok.status_code, status.HTTP_201_CREATED)
 
+
+
+class UiIgnoreHttpsErrorsRuntimeTests(SimpleTestCase):
+    """ignore_https_errors 三态在 effective_runtime 中的合并规则。"""
+
+    def _resolve(self, env=None, run_options=None):
+        from ui_automation.runtime_config import resolve_from_env_and_actuator
+
+        return resolve_from_env_and_actuator(
+            env=env,
+            actuator_info={'browser_type': 'chromium'},
+            run_options=run_options,
+        )
+
+    def test_unset_means_auto(self):
+        effective = self._resolve(env={'name': 'e', 'base_url': 'https://a.local'})
+        self.assertIsNone(effective['ignore_https_errors'])
+        self.assertEqual(effective['source']['ignore_https_errors'], 'auto')
+
+    def test_env_true_wins_over_auto(self):
+        effective = self._resolve(env={'name': 'e', 'ignore_https_errors': True})
+        self.assertIs(effective['ignore_https_errors'], True)
+        self.assertEqual(effective['source']['ignore_https_errors'], 'env')
+
+    def test_env_false_is_kept_not_dropped(self):
+        effective = self._resolve(env={'name': 'e', 'ignore_https_errors': False})
+        self.assertIs(effective['ignore_https_errors'], False)
+        self.assertEqual(effective['source']['ignore_https_errors'], 'env')
+
+    def test_run_options_overrides_env(self):
+        effective = self._resolve(
+            env={'name': 'e', 'ignore_https_errors': True},
+            run_options={'ignore_https_errors': False},
+        )
+        self.assertIs(effective['ignore_https_errors'], False)
+        self.assertEqual(effective['source']['ignore_https_errors'], 'run_options')
+
+    def test_null_run_option_falls_back_to_env(self):
+        effective = self._resolve(
+            env={'name': 'e', 'ignore_https_errors': True},
+            run_options={'ignore_https_errors': None},
+        )
+        self.assertIs(effective['ignore_https_errors'], True)
+        self.assertEqual(effective['source']['ignore_https_errors'], 'env')
+
+    def test_public_and_snapshot_include_key_but_no_db_secret(self):
+        from ui_automation.runtime_config import (
+            build_environment_snapshot,
+            public_effective_runtime,
+        )
+
+        effective = self._resolve(env={'name': 'e', 'ignore_https_errors': True})
+        self.assertIn('ignore_https_errors', public_effective_runtime(effective))
+        self.assertIn('ignore_https_errors', build_environment_snapshot(effective))
+
+
+class UiClientCertPayloadTests(TestCase):
+    """证书任务载荷组装与回传脱敏。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._media_root = tempfile.mkdtemp(prefix='wharttest-ui-cert-test-')
+        cls._override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._override.enable()
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+
+    def setUp(self):
+        from ui_automation.models import UiEnvironmentConfig
+
+        self.UiEnvironmentConfig = UiEnvironmentConfig
+        self.project = Project.objects.create(name='UI Cert Project')
+        self.user = User.objects.create_user(username='ui-cert-user', password='x')
+        self.asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            file=ContentFile(b'fake-pfx-bytes', name='client.p12'),
+            original_name='client.p12',
+            extension='.p12',
+            size=14,
+        )
+
+    def _env(self, certificate=None):
+        return self.UiEnvironmentConfig.objects.create(
+            project=self.project,
+            name='ui-env',
+            base_url='https://ui.local',
+            client_certificate=certificate,
+            creator=self.user,
+        )
+
+    def test_no_certificate_returns_none(self):
+        self.assertIsNone(build_env_client_cert_payload(self._env()))
+
+    def test_payload_carries_files_and_passphrase(self):
+        certificate = ClientCertificate.objects.create(
+            name='ui-cert',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        certificate.set_passphrase('ui-pass')
+        certificate.save(update_fields=['passphrase_encrypted'])
+
+        payload = build_env_client_cert_payload(self._env(certificate))
+        self.assertEqual(payload['cert_type'], 'pkcs12')
+        self.assertEqual(payload['passphrase'], 'ui-pass')
+        self.assertEqual(payload['cert_file']['file_id'], self.asset.id)
+        self.assertEqual(payload['origins'], ['https://ui.local'])
+
+    def test_sanitize_strips_passphrase_but_keeps_flag(self):
+        from ui_automation.consumers import UiAutomationConsumer
+
+        sanitized = UiAutomationConsumer._sanitize_result_args({
+            'case_id': 1,
+            'client_cert': {
+                'cert_type': 'pkcs12',
+                'passphrase': 'ui-pass',
+                'cert_file': {'file_id': 9},
+            },
+        })
+        self.assertNotIn('passphrase', sanitized['client_cert'])
+        self.assertTrue(sanitized['client_cert']['has_passphrase'])
+        self.assertEqual(sanitized['client_cert']['cert_file']['file_id'], 9)
+        self.assertEqual(sanitized['case_id'], 1)
+
+    def test_sanitize_does_not_mutate_original(self):
+        from ui_automation.consumers import UiAutomationConsumer
+
+        original = {'client_cert': {'passphrase': 'keep-me'}}
+        UiAutomationConsumer._sanitize_result_args(original)
+        self.assertEqual(original['client_cert']['passphrase'], 'keep-me')
+
+
+class UiEnvironmentConfigCertificateApiTests(TestCase):
+    """环境配置接口：证书不可回显口令，且必须同项目。"""
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(username='env-admin', password='secret')
+        self.project = Project.objects.create(name='Env Cert Project')
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            file=ContentFile(b'bytes', name='c.p12'),
+            original_name='c.p12',
+            extension='.p12',
+            size=5,
+        )
+
+    def _payload(self, **extra):
+        payload = {
+            'project': self.project.id,
+            'name': 'env',
+            'base_url': 'https://env.local',
+            'ignore_https_errors': True,
+        }
+        payload.update(extra)
+        return payload
+
+    def test_create_env_with_certificate_returns_summary_without_passphrase(self):
+        certificate = ClientCertificate.objects.create(
+            name='cert-a',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        certificate.set_passphrase('top-secret')
+        certificate.save(update_fields=['passphrase_encrypted'])
+
+        response = self.client.post(
+            '/api/ui-automation/env-configs/',
+            self._payload(client_certificate=certificate.id),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        body = response.data
+        self.assertNotIn('top-secret', str(body))
+        self.assertIs(body['ignore_https_errors'], True)
+        cert_info = body['client_cert_info']
+        self.assertEqual(cert_info['id'], certificate.id)
+        self.assertTrue(cert_info['has_passphrase'])
+
+    def test_certificate_from_other_project_is_rejected(self):
+        other_project = Project.objects.create(name='Other Project')
+        foreign_cert = ClientCertificate.objects.create(
+            name='foreign',
+            project=other_project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=None,
+            created_by=self.user,
+        )
+        response = self.client.post(
+            '/api/ui-automation/env-configs/',
+            self._payload(client_certificate=foreign_cert.id),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client_certificate', response.data)

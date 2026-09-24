@@ -6,7 +6,8 @@ import {
   IconStorage,
   IconLink,
   IconSearch,
-  IconSettings
+  IconSettings,
+  IconSafe
 } from '@arco-design/web-vue/es/icon'
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
   searchKeyword: string
   showGlobalHeaders?: boolean
   showDatabaseConfig?: boolean
+  showClientCert?: boolean
 }
 
 interface Emits {
@@ -24,6 +26,7 @@ interface Emits {
   (e: 'create'): void
   (e: 'selectGlobalHeaders'): void
   (e: 'selectDatabaseConfig'): void
+  (e: 'selectClientCert'): void
 }
 
 const props = defineProps<Props>()
@@ -117,6 +120,29 @@ const filteredEnvironments = computed(() => {
                     <div class="font-medium entry-title truncate max-w-full">数据库配置</div>
                     <div class="mt-1 text-xs entry-subtitle truncate max-w-full">
                       项目级别的数据库连接配置
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 客户端证书卡片 -->
+            <div
+              class="mb-4 cursor-pointer transition-all w-full card-item"
+              @click="emit('selectClientCert')"
+            >
+              <div
+                class="env-entry-card env-entry-card--green w-full"
+                :class="{ 'is-active is-green': showClientCert }"
+              >
+                <div class="p-4 flex items-center gap-4">
+                  <div class="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center flex-shrink-0">
+                    <icon-safe class="text-green-500 text-xl" />
+                  </div>
+                  <div class="flex-1 min-w-0 overflow-hidden">
+                    <div class="font-medium entry-title truncate max-w-full">客户端证书</div>
+                    <div class="mt-1 text-xs entry-subtitle truncate max-w-full">
+                      项目级别的 HTTPS 客户端证书（mTLS）
                     </div>
                   </div>
                 </div>
@@ -309,6 +335,11 @@ const filteredEnvironments = computed(() => {
 .env-entry-card--purple:hover,
 .env-entry-card.is-purple {
   border-color: rgb(168 85 247 / 0.65);
+}
+
+.env-entry-card--green:hover,
+.env-entry-card.is-green {
+  border-color: rgb(16 185 129 / 0.65);
 }
 
 .env-entry-card--blue:hover,

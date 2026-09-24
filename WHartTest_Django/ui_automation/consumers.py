@@ -555,6 +555,13 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         args["_selected_actuator_for_slots"] = selected["id"]
         if effective.get("env_config_id") and not args.get("env_config_id"):
             args["env_config_id"] = effective["env_config_id"]
+
+        # HTTPS 客户端证书：把「托管文件描述 + 口令」挂到任务参数上，执行器据此
+        # 下载证书文件并注入 Playwright。⚠️ 口令明文只经此 WebSocket 通道下发执行器，
+        # 回传前端前必须经 _sanitize_result_args 剥离。
+        from client_certificates.services import build_env_client_cert_payload
+
+        args["client_cert"] = build_env_client_cert_payload(env)
         return args, actuator, ""
 
     @staticmethod
@@ -576,10 +583,24 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
     @staticmethod
     def _sanitize_result_args(args: dict) -> dict:
-        """Copy result args for frontend broadcast without db secrets."""
+        """Copy result args for frontend broadcast without secrets.
+
+        客户端证书口令属敏感信息：只允许在「平台 → 执行器」的 WebSocket 下发通道
+        中出现，任何广播/回执给前端的 args 都必须先把 passphrase 剥离。
+        """
         if not isinstance(args, dict):
             return {}
-        return dict(args)
+        sanitized = dict(args)
+        client_cert = sanitized.get("client_cert")
+        if isinstance(client_cert, dict):
+            cert_copy = dict(client_cert)
+            had_passphrase = client_cert.get("passphrase") is not None
+            cert_copy.pop("passphrase", None)
+            if had_passphrase or client_cert.get("has_passphrase"):
+                # 保留"已设置口令"这一事实，便于前端展示，但不泄露内容
+                cert_copy["has_passphrase"] = True
+            sanitized["client_cert"] = cert_copy
+        return sanitized
 
     @staticmethod
     def _public_effective(effective):

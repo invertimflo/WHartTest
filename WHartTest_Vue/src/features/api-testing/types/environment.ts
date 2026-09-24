@@ -1,5 +1,13 @@
 import type { UserBrief } from './common';
 
+export interface ApiClientCertificateBrief {
+  id: number;
+  name: string;
+  cert_type: 'pem' | 'pkcs12';
+  has_passphrase: boolean;
+  is_active: boolean;
+}
+
 export interface ApiEnvironment {
   id: number;
   name: string;
@@ -9,6 +17,9 @@ export interface ApiEnvironment {
   project: number;
   parent: number | null;
   database_config: number | null;
+  /** HTTPS 客户端证书（mTLS）引用，可为空 */
+  client_certificate: number | null;
+  client_certificate_info: ApiClientCertificateBrief | null;
   is_active: boolean;
   created_by: UserBrief | null;
   created_at: string;

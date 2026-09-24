@@ -425,6 +425,7 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
     """环境配置序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     auth_state_active = serializers.SerializerMethodField()
+    client_cert_info = serializers.SerializerMethodField()
 
     class Meta:
         model = UiEnvironmentConfig
@@ -434,6 +435,34 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
     def get_auth_state_active(self, obj) -> bool:
         """该环境当前是否有启用的登录态（前端列表徽标展示）。"""
         return UiAuthState.objects.filter(env_config_id=obj.id, is_active=True).exists()
+
+    def get_client_cert_info(self, obj) -> dict:
+        """客户端证书摘要（**绝不含口令明文**，只暴露 has_passphrase）。"""
+        certificate = obj.client_certificate if obj.client_certificate_id else None
+        if certificate is None:
+            return None
+        return {
+            'id': certificate.id,
+            'name': certificate.name,
+            'cert_type': certificate.cert_type,
+            'has_passphrase': certificate.has_passphrase,
+            'is_active': certificate.is_active,
+        }
+
+    def validate(self, attrs):
+        """证书必须与环境中同项目。"""
+        instance = self.instance
+        certificate = attrs.get(
+            'client_certificate', getattr(instance, 'client_certificate', None)
+        )
+        project_id = getattr(instance, 'project_id', None) or getattr(
+            attrs.get('project'), 'id', None
+        )
+        if certificate is not None and project_id and certificate.project_id != project_id:
+            raise serializers.ValidationError({
+                'client_certificate': ['Client certificate must belong to the same project.'],
+            })
+        return attrs
 
 
 class UiAuthStateSerializer(serializers.ModelSerializer):

@@ -57,6 +57,7 @@ from drf_spectacular.views import (
 
 # 导入 API 自动化测试模块视图集。
 from api_database_configs.views import ApiDatabaseConfigViewSet
+from client_certificates.views import ClientCertificateViewSet
 from api_environments.views import (
     ApiEnvironmentViewSet,
     ApiEnvironmentVariableViewSet,
@@ -119,6 +120,7 @@ projects_router.register(r'task-executions', TaskExecViewSet, basename='project-
 
 # 注册 API 自动化测试嵌套路由。
 projects_router.register(r'api-database-configs', ApiDatabaseConfigViewSet, basename='project-api-database-configs')
+projects_router.register(r'client-certificates', ClientCertificateViewSet, basename='project-client-certificates')
 projects_router.register(r'api-environments', ApiEnvironmentViewSet, basename='project-api-environments')
 projects_router.register(r'api-environment-variables', ApiEnvironmentVariableViewSet, basename='project-api-environment-variables')
 projects_router.register(r'api-global-headers', ApiGlobalRequestHeaderViewSet, basename='project-api-global-headers')

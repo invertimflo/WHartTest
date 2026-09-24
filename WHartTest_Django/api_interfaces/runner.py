@@ -499,6 +499,20 @@ class InterfaceRunner(HttpRunner):
         except Exception as e:
             logger.error(f"Failed to update environment variables: {str(e)}")
 
+        # HTTPS 客户端证书（mTLS）：运行时按环境覆盖接口级配置。
+        # 材料已由 api_environments.services.build_environment_payload() 准备成
+        # requests 可直接使用的形态（PEM 路径或 (证书, 私钥) 二元组）。
+        try:
+            if environment and isinstance(environment, dict) and environment.get('client_cert'):
+                self.config.cert(environment['client_cert'])
+                logger.info(
+                    "Using environment client certificate: trace_id=%s cert=%s",
+                    self.trace_id,
+                    environment['client_cert'],
+                )
+        except Exception as e:
+            logger.error(f"Failed to apply client certificate: {str(e)}")
+
         # Process DB config for SQL interfaces
         try:
             if (

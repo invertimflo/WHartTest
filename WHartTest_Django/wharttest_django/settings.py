@@ -135,6 +135,7 @@ INSTALLED_APPS = [
     'task_center', # 任务中心应用
     'django_celery_beat', # Celery Beat 数据库调度器
     'api_database_configs',  # API 数据库配置应用。
+    'client_certificates',  # HTTPS 客户端证书（项目级资源，接口/UI 环境共用）。
     'api_environments',  # API 环境管理应用。
     'api_modules',  # API 接口模块应用。
     'api_functions',  # API 自定义函数应用。

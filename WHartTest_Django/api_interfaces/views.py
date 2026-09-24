@@ -327,13 +327,13 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         if environment_id:
             try:
                 from api_environments.models import ApiEnvironment as Environment
+                from api_environments.services import build_environment_payload
+
                 project_pk = self.kwargs.get('project_pk')
                 environment = get_object_or_404(Environment, id=environment_id, project_id=project_pk)
 
-                if hasattr(environment, 'get_all_variables') and callable(
-                    environment.get_all_variables
-                ):
-                    env_config['variables'] = environment.get_all_variables()
+                # 统一经由 payload 组装器，确保变量/证书等字段不会漏传
+                env_config = build_environment_payload(environment) or {}
 
                 if interface_type == 'sql' and hasattr(environment, 'get_database_config'):
                     db_config = environment.get_database_config()
@@ -479,12 +479,12 @@ class ApiInterfaceViewSet(BaseModelViewSet):
         if environment_id:
             try:
                 from api_environments.models import ApiEnvironment as Environment
+                from api_environments.services import build_environment_payload
+
                 environment = get_object_or_404(Environment, id=environment_id, project_id=project_pk)
 
-                if hasattr(environment, 'get_all_variables') and callable(
-                    environment.get_all_variables
-                ):
-                    env_config['variables'] = environment.get_all_variables()
+                # 统一经由 payload 组装器，确保变量/证书等字段不会漏传
+                env_config = build_environment_payload(environment) or {}
 
                 if interface_type == 'sql' and hasattr(environment, 'get_database_config'):
                     db_config = environment.get_database_config()

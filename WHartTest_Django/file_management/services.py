@@ -463,6 +463,17 @@ def resolve_file_reference_detail(ref: FileReference) -> dict:
                         'page_name': obj.page.name if obj.page_id else '',
                         'module_name': obj.module.name if obj.module_id else '',
                     })
+        elif ref.ref_type == FileReference.REF_CLIENT_CERT:
+            from client_certificates.models import ClientCertificate
+            obj = ClientCertificate.objects.filter(
+                id=ref_id, project_id=ref.project_id
+            ).first()
+            if obj:
+                data.update({
+                    'object_id': obj.id,
+                    'object_name': obj.name,
+                    'description': f"客户端证书（{obj.get_cert_type_display()}）",
+                })
         elif ref.ref_type == FileReference.REF_LLM_CHAT:
             from langgraph_integration.models import ChatSession
             chat_session = ChatSession.objects.filter(

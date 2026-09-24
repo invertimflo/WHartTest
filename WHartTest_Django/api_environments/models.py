@@ -35,6 +35,14 @@ class ApiEnvironment(models.Model):
         related_name='api_environments',
         verbose_name=_("Database Config"),
     )
+    client_certificate = models.ForeignKey(
+        'client_certificates.ClientCertificate',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='api_environments',
+        verbose_name=_("Client Certificate"),
+    )
     is_active = models.BooleanField(_("Active"), default=True)
     created_by = models.ForeignKey(
         User,
@@ -75,6 +83,11 @@ class ApiEnvironment(models.Model):
                 'database_config': _('Database config must belong to the same project.'),
             })
 
+        if self.client_certificate and self.client_certificate.project_id != self.project_id:
+            raise ValidationError({
+                'client_certificate': _('Client certificate must belong to the same project.'),
+            })
+
     def get_all_variables(self):
         """Return all variables including inherited ones from parent environments."""
         variables = {}
@@ -98,6 +111,17 @@ class ApiEnvironment(models.Model):
             return self.database_config
         if self.parent:
             return self.parent.get_database_config()
+        return None
+
+    def get_client_certificate(self):
+        """Return the client certificate, walking up the parent chain if necessary.
+
+        与 get_database_config() 的继承语义保持一致：子环境未配置时沿用父环境证书。
+        """
+        if self.client_certificate:
+            return self.client_certificate
+        if self.parent:
+            return self.parent.get_client_certificate()
         return None
 
 

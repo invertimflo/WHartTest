@@ -643,6 +643,16 @@ def run_step_request(runner: HttpRunner, step: TStep) -> StepResult:
     url_path = parsed_request_dict.pop("url")
     url = build_url(config.base_url, url_path)
     parsed_request_dict["verify"] = config.verify
+    # HTTPS 客户端证书与 verify 走同一条"每请求显式传参"通道：
+    # step 级 cert 优先（用例内可覆盖），否则回落 config 级（环境证书）。
+    # 注意 requests 会忽略 cert 为 None 的情况，因此这里只在有值时才写入。
+    step_cert = parsed_request_dict.get("cert")
+    config_cert = getattr(config, "cert", None)
+    effective_cert = step_cert or config_cert
+    if effective_cert:
+        parsed_request_dict["cert"] = effective_cert
+    else:
+        parsed_request_dict.pop("cert", None)
     parsed_request_dict["json"] = parsed_request_dict.pop("req_json", {})
     request_json_body = parsed_request_dict.get("json")
     request_data_body = parsed_request_dict.get("data")

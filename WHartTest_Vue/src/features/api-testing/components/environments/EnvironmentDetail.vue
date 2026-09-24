@@ -108,6 +108,27 @@ const isDarkTheme = computed(() => themeStore.isBlack)
               </div>
             </div>
           </div>
+          <div class="space-y-2" v-if="environment.client_certificate_info">
+            <div class="detail-label text-sm">客户端证书（HTTPS / mTLS）</div>
+            <div class="detail-value-shell p-3 rounded-lg space-y-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="detail-inline-label">名称：</span>
+                <span class="detail-value-text break-all">{{ environment.client_certificate_info.name }}</span>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="detail-inline-label">类型：</span>
+                <span class="detail-value-text">{{ environment.client_certificate_info.cert_type === 'pkcs12' ? 'PKCS#12' : 'PEM' }}</span>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="detail-inline-label">口令：</span>
+                <span class="detail-value-text">{{ environment.client_certificate_info.has_passphrase ? '已配置' : '无' }}</span>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap" v-if="environment.client_certificate_info.is_active === false">
+                <span class="detail-inline-label">状态：</span>
+                <span class="detail-value-text text-red-400">已禁用</span>
+              </div>
+            </div>
+          </div>
           <div class="space-y-2">
             <div class="detail-label text-sm">基础 URL</div>
             <div class="detail-value-shell p-3 rounded-lg break-all">

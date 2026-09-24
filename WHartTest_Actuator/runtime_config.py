@@ -37,6 +37,11 @@ RUNTIME_BROWSER_KEYS = (
     "timeout",
 )
 
+# HTTPS 忽略证书校验是三态：None = auto（由执行器按 stealth / 客户端证书推导），
+# True / False 强制覆盖。它没有 actuator / hard 默认值，因此不放进 RUNTIME_BROWSER_KEYS
+# 的通用分层循环，单独处理（与 Django 侧 ui_automation/runtime_config.py 保持一致）。
+IGNORE_HTTPS_ERRORS_KEY = "ignore_https_errors"
+
 
 class RuntimeConfigError(ValueError):
     """Raised when runtime config cannot be resolved or matched."""
@@ -158,6 +163,10 @@ def normalize_run_options(run_options: Optional[dict[str, Any]]) -> dict[str, An
             raise RuntimeConfigError("invalid timeout in run_options")
         if timeout is not None:
             normalized["timeout"] = timeout
+    if IGNORE_HTTPS_ERRORS_KEY in run_options:
+        ignore_https_errors = normalize_bool(run_options.get(IGNORE_HTTPS_ERRORS_KEY))
+        if ignore_https_errors is not None:
+            normalized[IGNORE_HTTPS_ERRORS_KEY] = ignore_https_errors
     return normalized
 
 
@@ -187,6 +196,10 @@ def extract_env_policy(env_config: Optional[Any]) -> dict[str, Any]:
     timeout = normalize_timeout_ms(_get("timeout"), unit_hint="ms")
     if timeout is not None:
         policy["timeout"] = timeout
+    # 三态：None 不进 policy（表示 auto），只有显式 True/False 才作为环境级策略下发
+    ignore_https_errors = normalize_bool(_get(IGNORE_HTTPS_ERRORS_KEY))
+    if ignore_https_errors is not None:
+        policy[IGNORE_HTTPS_ERRORS_KEY] = ignore_https_errors
     return policy
 
 
@@ -332,6 +345,14 @@ def resolve_effective_runtime(
         or source.get("viewport_height") in {SOURCE_RUN, SOURCE_ENV}
     )
 
+    # 三态：run_options 优先于环境策略；两层都没配则回落 None（auto）
+    if IGNORE_HTTPS_ERRORS_KEY in options:
+        ignore_https_errors = options[IGNORE_HTTPS_ERRORS_KEY]
+    elif IGNORE_HTTPS_ERRORS_KEY in policy:
+        ignore_https_errors = policy[IGNORE_HTTPS_ERRORS_KEY]
+    else:
+        ignore_https_errors = None
+
     return {
         "env_config_id": env_config_id,
         "env_name": env_name,
@@ -348,6 +369,7 @@ def resolve_effective_runtime(
         "forced_by_runtime": forced_by_runtime,
         "viewport_explicit": viewport_explicit,
         "source_mode": source_mode,
+        IGNORE_HTTPS_ERRORS_KEY: ignore_https_errors,
     }
 
 

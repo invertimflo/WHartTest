@@ -261,6 +261,7 @@ COPY api_testcases/ /app/api_testcases/
 COPY api_testtasks/ /app/api_testtasks/
 COPY httprunner/ /app/httprunner/
 COPY file_management/ /app/file_management/
+COPY client_certificates/ /app/client_certificates/
 COPY knowledge/ /app/knowledge/
 COPY langgraph_integration/ /app/langgraph_integration/
 COPY mcp_tools/ /app/mcp_tools/

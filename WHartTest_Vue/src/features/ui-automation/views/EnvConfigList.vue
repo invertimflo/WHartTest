@@ -36,6 +36,10 @@
         <a-tag v-if="record.auth_state_active" color="green">有登录态</a-tag>
         <a-tag v-else color="gray">未配置</a-tag>
       </template>
+      <template #client_cert="{ record }">
+        <a-tag v-if="record.client_cert_info" color="arcoblue">{{ record.client_cert_info.name }}</a-tag>
+        <span v-else>-</span>
+      </template>
       <template #operations="{ record }">
         <a-space :size="4">
           <a-button v-if="!record.is_default" type="text" size="mini" @click="setDefault(record)">
@@ -153,6 +157,39 @@
         <a-form-item field="is_default" label="设为默认">
           <a-switch v-model="formData.is_default" />
         </a-form-item>
+        <a-divider>HTTPS / 客户端证书</a-divider>
+        <a-form-item label="客户端证书">
+          <a-select
+            v-model="formData.client_certificate"
+            placeholder="不关联客户端证书"
+            allow-clear
+            allow-search
+            :loading="loadingCerts"
+          >
+            <a-option :value="null">不关联客户端证书</a-option>
+            <a-option
+              v-for="cert in clientCertificates"
+              :key="cert.id"
+              :value="cert.id"
+              :label="cert.name"
+              :disabled="!cert.is_active"
+            >
+              {{ cert.name }}
+              <span v-if="!cert.is_active" class="cert-option-note">（已禁用）</span>
+              <span v-else-if="cert.has_passphrase" class="cert-option-note">（有口令）</span>
+            </a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item label="忽略 HTTPS 证书校验">
+          <a-select v-model="formData.ignore_https_errors" placeholder="自动">
+            <a-option :value="null">自动（默认）</a-option>
+            <a-option :value="true">忽略校验（跳过证书错误）</a-option>
+            <a-option :value="false">严格校验</a-option>
+          </a-select>
+          <template #extra>
+            <span class="cert-option-note">「自动」下仅当未配置客户端证书时按执行器节点默认策略处理。</span>
+          </template>
+        </a-form-item>
         <a-divider>数据库配置</a-divider>
         <a-row :gutter="16">
           <a-col :span="8">
@@ -214,9 +251,9 @@ import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconCheck, IconSafe } from '@arco-design/web-vue/es/icon'
 import { useProjectStore } from '@/store/projectStore'
-import { envConfigApi, authStateApi } from '../api'
+import { envConfigApi, authStateApi, clientCertificateApi } from '../api'
 import AuthCaptureModal from '../components/AuthCaptureModal.vue'
-import type { UiEnvironmentConfig, UiEnvironmentConfigForm, UiAuthState } from '../types'
+import type { UiEnvironmentConfig, UiEnvironmentConfigForm, UiAuthState, UiClientCertificate } from '../types'
 import { extractPaginationData } from '../types'
 
 const projectStore = useProjectStore()
@@ -251,8 +288,31 @@ const formData = reactive<UiEnvironmentConfigForm>({
   db_type: 'mysql',
   mysql_config: {},
   extra_config: {},
+  client_certificate: null,
+  ignore_https_errors: null,
   is_default: false,
 })
+
+// 项目级客户端证书（HTTPS / mTLS），供环境引用
+const clientCertificates = ref<UiClientCertificate[]>([])
+const loadingCerts = ref(false)
+
+const fetchClientCertificates = async () => {
+  if (!projectId.value) {
+    clientCertificates.value = []
+    return
+  }
+  loadingCerts.value = true
+  try {
+    const res = await clientCertificateApi.list(projectId.value, { is_active: true })
+    const { items } = extractPaginationData(res)
+    clientCertificates.value = items as UiClientCertificate[]
+  } catch {
+    clientCertificates.value = []
+  } finally {
+    loadingCerts.value = false
+  }
+}
 
 const rules = {
   name: [{ required: true, message: '请输入环境名称' }],
@@ -264,6 +324,7 @@ const columns = [
   { title: '基础 URL', dataIndex: 'base_url', ellipsis: true, tooltip: true, width: 200, align: 'center' as const },
   { title: '默认', slotName: 'is_default', width: 70, align: 'center' as const },
   { title: '登录态', slotName: 'auth_state', width: 90, align: 'center' as const },
+  { title: '客户端证书', slotName: 'client_cert', width: 130, align: 'center' as const, ellipsis: true, tooltip: true },
   { title: '创建者', dataIndex: 'creator_name', width: 100, align: 'center' as const },
   { title: '操作', slotName: 'operations', width: 250, fixed: 'right' as const, align: 'center' as const },
 ]
@@ -444,6 +505,8 @@ const resetForm = () => {
     db_type: 'mysql',
     mysql_config: {},
     extra_config: {},
+    client_certificate: null,
+    ignore_https_errors: null,
     is_default: false,
   })
   Object.assign(mysqlConfig, { host: '', port: 3306, user: '', password: '', database: '' })
@@ -468,6 +531,8 @@ const editConfig = (record: UiEnvironmentConfig) => {
     db_type: record.db_type || 'mysql',
     mysql_config: record.mysql_config || {},
     extra_config: record.extra_config || {},
+    client_certificate: record.client_cert_info?.id ?? record.client_certificate ?? null,
+    ignore_https_errors: record.ignore_https_errors ?? null,
     is_default: record.is_default,
   })
   const cfg = record.mysql_config || {}
@@ -567,6 +632,7 @@ watch(projectId, () => {
   if (projectId.value) {
     pagination.current = 1
     fetchData()
+    fetchClientCertificates()
   }
 }, { immediate: true })
 </script>
@@ -636,5 +702,9 @@ watch(projectId, () => {
 .auth-expired {
   color: var(--color-danger-6, #f53f3f);
   font-weight: 500;
+}
+.cert-option-note {
+  font-size: 12px;
+  color: var(--color-text-3);
 }
 </style>

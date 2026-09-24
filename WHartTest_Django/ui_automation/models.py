@@ -474,6 +474,15 @@ class UiEnvironmentConfig(models.Model):
     db_type = models.CharField(_('数据库类型'), max_length=20, choices=DB_TYPE_CHOICES, default='mysql')
     mysql_config = models.JSONField(_('MySQL配置'), null=True, blank=True)
     extra_config = models.JSONField(_('额外配置'), null=True, blank=True)
+    # HTTPS 客户端证书（mTLS）：项目级证书资源，环境引用即可
+    client_certificate = models.ForeignKey(
+        'client_certificates.ClientCertificate', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='ui_env_configs', verbose_name=_('客户端证书')
+    )
+    # 忽略证书校验三态：None=auto（回落执行器节点默认/有证书时启用） / True / False
+    ignore_https_errors = models.BooleanField(
+        _('忽略 HTTPS 证书校验'), null=True, blank=True, default=None
+    )
     is_default = models.BooleanField(_('是否默认'), default=False)
     creator = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True,

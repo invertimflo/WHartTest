@@ -31,6 +31,7 @@ from client_cert import (
 )
 from executor import PageStepConfig, PlaywrightExecutor, TestCaseConfig
 from main import Config, parse_tri_state_bool
+from runtime_config import extract_env_policy, normalize_run_options, resolve_from_env_and_actuator
 
 
 # 一个明显的哨兵口令：任何日志里出现它都算泄漏
@@ -493,6 +494,89 @@ class SetTaskOriginsTest(ActuatorTestCase):
         executor = self.make_executor()
         executor.set_task_origins('https://a.com, https://b.com')
         self.assertEqual(executor._task_cert_origins, ['https://a.com', 'https://b.com'])
+
+
+class PrepareTaskOriginsTest(ActuatorTestCase):
+    """任务级 origin 固定的入口语义（prepare / refresh / clear）。
+
+    关键点：平台随证书下发的 origin 未必出现在 config 里，执行入口内部按 config
+    refresh 时不能把它冲掉 —— 这是「环境 base_url 与用例 URL 不同源」场景下
+    证书仍然生效的前提。
+    """
+
+    def test_prepare_merges_platform_origins_with_config_origins(self):
+        executor = self.make_executor()
+        case = TestCaseConfig(
+            case_id=1, case_name='c', env_config={'base_url': 'https://a.example.com/x'}
+        )
+        origins = executor.prepare_task_origins(
+            case, extra_origins=['https://mtls.example.com:8443']
+        )
+        self.assertEqual(
+            origins,
+            ['https://a.example.com', 'https://mtls.example.com:8443'],
+        )
+        self.assertEqual(executor._task_cert_origins, origins)
+
+    def test_refresh_keeps_platform_origins_absent_from_config(self):
+        executor = self.make_executor()
+        case = TestCaseConfig(
+            case_id=2, case_name='c', env_config={'base_url': 'https://a.example.com'}
+        )
+        executor.prepare_task_origins(case, extra_origins=['https://platform.example.com'])
+
+        # 执行入口内部会按 config 重新推导，此时平台下发的 origin 必须保留
+        refreshed = executor.refresh_task_origins(case)
+        self.assertEqual(
+            refreshed,
+            ['https://a.example.com', 'https://platform.example.com'],
+        )
+
+    def test_extra_origins_are_deduplicated(self):
+        executor = self.make_executor()
+        case = TestCaseConfig(
+            case_id=3, case_name='c', env_config={'base_url': 'https://a.example.com'}
+        )
+        executor.prepare_task_origins(case, extra_origins=['https://a.example.com'])
+        self.assertEqual(executor._task_cert_origins, ['https://a.example.com'])
+
+    def test_prepare_without_extra_origins_resets_previous_task(self):
+        executor = self.make_executor()
+        executor.prepare_task_origins(
+            TestCaseConfig(case_id=4, case_name='c', env_config={'base_url': 'https://a.com'}),
+            extra_origins=['https://stale.example.com'],
+        )
+        # 下一个任务没有证书（extra_origins 缺省）→ 上一个任务的 origin 不得残留
+        fresh = executor.prepare_task_origins(
+            TestCaseConfig(case_id=5, case_name='d', env_config={'base_url': 'https://b.com'})
+        )
+        self.assertEqual(fresh, ['https://b.com'])
+
+    def test_prepare_drops_invalid_platform_origins(self):
+        executor = self.make_executor()
+        origins = executor.prepare_task_origins(
+            None, extra_origins=['http://insecure.example.com', 'not-a-url']
+        )
+        self.assertEqual(origins, [])
+
+    def test_clear_task_origins_clears_both_sets(self):
+        executor = self.make_executor()
+        executor.prepare_task_origins(None, extra_origins=['https://a.example.com'])
+        executor.clear_task_origins()
+        self.assertEqual(executor._task_cert_origins, [])
+        self.assertEqual(executor._task_extra_origins, [])
+        # 清空后 refresh 不应把平台 origin 又"复活"
+        self.assertEqual(executor.refresh_task_origins(None), [])
+
+    def test_restore_runtime_options_clears_task_origins(self):
+        executor = self.make_executor()
+        previous = executor.apply_runtime_options({'browser': 'chromium', 'headless': True})
+        executor.prepare_task_origins(None, extra_origins=['https://a.example.com'])
+        self.assertEqual(executor._task_cert_origins, ['https://a.example.com'])
+
+        executor.restore_runtime_options(previous)
+        self.assertEqual(executor._task_cert_origins, [])
+        self.assertEqual(executor._task_extra_origins, [])
 
 
 class ConfigureClientCertTest(ActuatorTestCase):
@@ -960,6 +1044,83 @@ class DjangoWhitelistConsistencyTest(unittest.TestCase):
         start = consumers.index('config_keys = (')
         end = consumers.index(')', start)
         self.assertNotIn('client_cert_passphrase', consumers[start:end])
+
+
+class IgnoreHttpsErrorsRuntimeTest(unittest.TestCase):
+    """执行器 local_merge 兜底路径的 ignore_https_errors 三态。
+
+    后端正常会直接下发 effective_runtime（已含该键）；这里覆盖的是后端未下发、
+    执行器按 env_config + 节点默认值本地合并的场景，行为必须与 Django 侧
+    ui_automation/runtime_config.py 一致：None = auto。
+    """
+
+    def _resolve(self, env=None, run_options=None):
+        return resolve_from_env_and_actuator(env=env, run_options=run_options)
+
+    def test_absent_everywhere_yields_none(self):
+        self.assertIsNone(self._resolve(env={'name': 'e'})['ignore_https_errors'])
+
+    def test_env_true_is_applied(self):
+        self.assertTrue(self._resolve(env={'ignore_https_errors': True})['ignore_https_errors'])
+
+    def test_env_false_is_applied(self):
+        self.assertFalse(self._resolve(env={'ignore_https_errors': False})['ignore_https_errors'])
+
+    def test_env_none_means_auto(self):
+        self.assertIsNone(self._resolve(env={'ignore_https_errors': None})['ignore_https_errors'])
+
+    def test_run_options_override_env(self):
+        resolved = self._resolve(
+            env={'ignore_https_errors': True},
+            run_options={'ignore_https_errors': False},
+        )
+        self.assertFalse(resolved['ignore_https_errors'])
+
+    def test_string_value_is_normalized(self):
+        self.assertTrue(self._resolve(env={'ignore_https_errors': 'true'})['ignore_https_errors'])
+
+    def test_env_policy_omits_auto(self):
+        """None 不进 policy：否则会被误判为"环境显式配置"。"""
+        self.assertNotIn('ignore_https_errors', extract_env_policy({'ignore_https_errors': None}))
+        self.assertIn('ignore_https_errors', extract_env_policy({'ignore_https_errors': False}))
+
+    def test_normalize_run_options_keeps_explicit_values(self):
+        self.assertEqual(
+            normalize_run_options({'ignore_https_errors': False})['ignore_https_errors'], False
+        )
+        self.assertNotIn('ignore_https_errors', normalize_run_options({'ignore_https_errors': None}))
+
+
+class ConsumerTaskOriginWiringTest(unittest.TestCase):
+    """三个执行入口必须显式固定任务 origin 并让三态开关贯通（防回归）。"""
+
+    def _consumer(self) -> str:
+        path = Path(__file__).parent / 'consumer.py'
+        return path.read_text(encoding='utf-8')
+
+    def test_every_entrypoint_prepares_task_origins(self):
+        src = self._consumer()
+        self.assertEqual(
+            src.count('self.executor.prepare_task_origins('), 3,
+            msg='页面步骤/用例/批量三个执行入口都要调用 prepare_task_origins',
+        )
+
+    def test_entrypoints_pass_platform_origins(self):
+        src = self._consumer()
+        self.assertEqual(src.count('extra_origins=self._client_cert_task_origins(args)'), 3)
+
+    def test_runtime_opts_forward_ignore_https_errors(self):
+        src = self._consumer()
+        self.assertIn(
+            '"ignore_https_errors": effective.get("ignore_https_errors")',
+            src,
+            msg='_runtime_for_executor 必须把三态开关透传给执行器',
+        )
+
+    def test_task_cert_resolved_and_downloaded(self):
+        src = self._consumer()
+        self.assertIn('await self._resolve_task_client_cert(args)', src)
+        self.assertIn('opts["client_cert"] = task_cert', src)
 
 
 if __name__ == '__main__':
