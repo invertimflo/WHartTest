@@ -5,6 +5,7 @@ LangChain v1 中间件配置模块
 包含：
 - ModelRetryMiddleware: 模型调用重试（替代手动重试逻辑）
 - ToolRetryMiddleware: 工具调用重试
+- LoopGuardMiddleware: 重复工具调用守卫（防死循环）
 - SummarizationMiddleware: 上下文摘要（替代 ConversationCompressor）
 - HumanInTheLoopMiddleware: 人工审批（新增功能）
 - 用户审批偏好：支持"记住审批选择"功能
@@ -26,6 +27,12 @@ from requirements.context_limits import (
     MODEL_CONTEXT_LIMITS,
     context_checker,
     get_context_limit_from_llm,
+)
+
+from .loop_guard import (
+    LoopGuardConfig,
+    build_loop_guard_middleware,
+    load_loop_guard_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -1055,6 +1062,45 @@ def get_human_in_the_loop_middleware(
 # ============== 组合中间件 ==============
 
 
+def _append_loop_guard_middleware(
+    middleware: List,
+    *,
+    enable_loop_guard: bool,
+    session_id: Optional[str],
+    loop_guard_config: Optional[LoopGuardConfig] = None,
+) -> List:
+    """
+    追加重复工具调用守卫中间件。
+
+    插入位置必须在 SummarizationMiddleware 之前：一旦历史被摘要改写，
+    重复调用特征就会被抹掉，守卫将失去判定依据。
+    """
+    if not enable_loop_guard:
+        logger.info("⏭️ 跳过 LoopGuardMiddleware: enable_loop_guard=False")
+        return middleware
+
+    config = loop_guard_config or load_loop_guard_config()
+    if not config.enabled:
+        logger.info("⏭️ 跳过 LoopGuardMiddleware: AGENT_LOOP_LOOP_GUARD_ENABLED 已关闭")
+        return middleware
+
+    if not session_id:
+        logger.info("⏭️ 跳过 LoopGuardMiddleware: 缺少 session_id，无法按会话隔离事件")
+        return middleware
+
+    middleware.append(
+        build_loop_guard_middleware(session_id=session_id, config=config)
+    )
+    logger.info(
+        "✅ 已添加 LoopGuardMiddleware (warn=%d, abort=%d, window=%d, require_same_result=%s)",
+        config.warn,
+        config.abort,
+        config.window,
+        config.require_same_result,
+    )
+    return middleware
+
+
 def get_standard_middleware(
     enable_model_retry: bool = True,
     enable_tool_retry: bool = True,
@@ -1071,6 +1117,9 @@ def get_standard_middleware(
     model_name: str = "gpt-4o",  # 用于精确 Token 计数
     tools: Optional[list] = None,  # 工具对象列表，用于精确计算 token 开销
     system_prompt: Optional[str] = None,  # 系统提示词，用于精确计算 token 开销
+    enable_loop_guard: bool = True,  # 重复工具调用守卫
+    loop_guard_session_id: Optional[str] = None,  # 守卫事件按会话隔离
+    loop_guard_config: Optional[LoopGuardConfig] = None,  # 未传则读环境变量
 ) -> List:
     """
     获取标准中间件组合
@@ -1090,6 +1139,9 @@ def get_standard_middleware(
         summarization_trigger_tokens: 摘要触发阈值
         summarization_keep_messages: 保留消息数
         model_name: 模型名称，用于精确 Token 计数
+        enable_loop_guard: 是否启用重复工具调用守卫
+        loop_guard_session_id: 守卫事件所属会话（通常与 hitl_session_id 相同）
+        loop_guard_config: 守卫阈值配置，默认从环境变量读取
 
     Returns:
         中间件列表
@@ -1103,6 +1155,14 @@ def get_standard_middleware(
     if enable_tool_retry:
         middleware.append(get_tool_retry_middleware())
         logger.debug("已添加 ToolRetryMiddleware")
+
+    # 守卫需在摘要之前：摘要会改写历史，导致重复调用特征丢失
+    _append_loop_guard_middleware(
+        middleware,
+        enable_loop_guard=enable_loop_guard,
+        session_id=loop_guard_session_id or hitl_session_id,
+        loop_guard_config=loop_guard_config,
+    )
 
     if enable_summarization and summarization_model is not None:
         summarization_mw = get_summarization_middleware(
@@ -1348,6 +1408,8 @@ def get_middleware_from_config(
         len(all_tool_names) if all_tool_names else 0,
     )
 
+    loop_guard_config = load_loop_guard_config()
+
     return get_standard_middleware(
         enable_model_retry=True,
         enable_tool_retry=True,
@@ -1364,6 +1426,9 @@ def get_middleware_from_config(
         model_name=model_name,
         tools=tools,
         system_prompt=system_prompt,
+        enable_loop_guard=loop_guard_config.enabled,
+        loop_guard_session_id=session_id,
+        loop_guard_config=loop_guard_config,
     )
 
 
@@ -1515,6 +1580,9 @@ async def get_standard_middleware_async(
     model_name: str = "gpt-4o",
     tools: Optional[list] = None,
     system_prompt: Optional[str] = None,
+    enable_loop_guard: bool = True,
+    loop_guard_session_id: Optional[str] = None,
+    loop_guard_config: Optional[LoopGuardConfig] = None,
 ) -> List:
     """获取标准中间件组合（异步版本）"""
     middleware = []
@@ -1526,6 +1594,14 @@ async def get_standard_middleware_async(
     if enable_tool_retry:
         middleware.append(get_tool_retry_middleware())
         logger.debug("已添加 ToolRetryMiddleware")
+
+    # 守卫需在摘要之前：摘要会改写历史，导致重复调用特征丢失
+    _append_loop_guard_middleware(
+        middleware,
+        enable_loop_guard=enable_loop_guard,
+        session_id=loop_guard_session_id or hitl_session_id,
+        loop_guard_config=loop_guard_config,
+    )
 
     if enable_summarization and summarization_model is not None:
         summarization_mw = get_summarization_middleware(
@@ -1636,6 +1712,8 @@ async def get_middleware_from_config_async(
         len(all_tool_names) if all_tool_names else 0,
     )
 
+    loop_guard_config = load_loop_guard_config()
+
     return await get_standard_middleware_async(
         enable_model_retry=True,
         enable_tool_retry=True,
@@ -1652,4 +1730,7 @@ async def get_middleware_from_config_async(
         model_name=model_name,
         tools=tools,
         system_prompt=system_prompt,
+        enable_loop_guard=loop_guard_config.enabled,
+        loop_guard_session_id=session_id,
+        loop_guard_config=loop_guard_config,
     )

@@ -8,9 +8,15 @@ Agent Loop API 视图 (LangChain v1 重构版)
 - 使用 create_agent() 统一创建 Agent
 - 使用 SummarizationMiddleware 自动处理上下文压缩
 - 使用 HumanInTheLoopMiddleware 处理 HITL 审批
+- 使用 LoopGuardMiddleware 检测并中止重复工具调用死循环
 - 在流处理层检测工具调用，生成 step_start/step_complete 事件
 - 支持 stream 参数控制流式/非流式输出
 - SSE 事件格式与旧版保持兼容，前端无需修改
+
+关于节点名（langchain v1）：
+`create_agent()` 生成的图节点为 `model` / `tools`（LangChain v1 迁移指南明确
+将流式节点名从 `agent` 改为 `model`）。此处统一用 `MODEL_NODE_NAMES` 兼容两代命名，
+并在 Agent 创建后打印实际节点名，避免上游版本变动导致 step 事件静默失效。
 """
 
 import asyncio
@@ -20,7 +26,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -40,6 +46,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain.agents import create_agent
+from langgraph.errors import GraphRecursionError
 from wharttest_django.checkpointer import get_async_checkpointer
 
 from .middleware_config import (
@@ -47,6 +54,22 @@ from .middleware_config import (
     get_model_tier,
     get_user_tool_approvals,
     get_user_friendly_llm_error,
+)
+from .loop_guard import (
+    LOOP_GUARD_ABORT,
+    LOOP_GUARD_MARKER,
+    LOOP_GUARD_WARN,
+    MODEL_NODE_NAMES,
+    TOOL_NODE_NAME,
+    ToolStep,
+    _get_env_float,
+    _get_env_int,
+    content_digest,
+    count_trailing_repeats,
+    get_loop_guard_bus,
+    load_loop_guard_config,
+    step_signatures,
+    truncate_tool_content,
 )
 from .playwright_instructions import PLAYWRIGHT_SCRIPT_INSTRUCTION
 from .stop_signal import should_stop, clear_stop_signal
@@ -95,6 +118,111 @@ def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
     return {"type": "error", "message": f"执行错误: {str(exc)}", "code": 500}
 
 
+# ============== 循环守卫辅助函数 ==============
+
+
+def _build_loop_abort_error_event(
+    *, tool: Optional[str], count: int, message: str
+) -> Dict[str, Any]:
+    """构造「检测到工具调用死循环并自动中止」的 SSE error 事件。
+
+    复用既有 `error` 事件类型，前端无需改动即可渲染为一条 AI 说明气泡。
+    """
+    return {
+        "type": "error",
+        "message": message,
+        "code": 409,
+        "error_code": "tool_call_loop",
+        "tool": tool,
+        "repeat_count": count,
+        "errors": {"detail": [message], "error_code": "tool_call_loop"},
+    }
+
+
+def _build_recursion_limit_error_event(
+    *, recursion_limit: int, step_count: int
+) -> Dict[str, Any]:
+    """构造 recursion_limit 触顶的友好 SSE error 事件"""
+    message = (
+        f"本次任务因反复调用工具达到执行步数上限（{recursion_limit}）已自动终止。"
+        "建议缩小需求范围、拆分任务后重试，或检查是否存在工具参数不合理导致的重复调用。"
+    )
+    return {
+        "type": "error",
+        "message": message,
+        "code": 409,
+        "error_code": "recursion_limit",
+        "recursion_limit": recursion_limit,
+        "step": step_count,
+        "errors": {"detail": [message], "error_code": "recursion_limit"},
+    }
+
+
+def _cli_tool_names(tool_calls: Any) -> List[str]:
+    names: List[str] = []
+    for tool_call in tool_calls or []:
+        if isinstance(tool_call, dict):
+            name = tool_call.get("name")
+        else:
+            name = getattr(tool_call, "name", None)
+        names.append(str(name or "unknown"))
+    return names
+
+
+def _is_streamable_token(token: Any, metadata: Any) -> bool:
+    """
+    判断 messages 流中的 token 是否应下发给前端。
+
+    过滤三类 token：
+    1) 空内容
+    2) 非模型节点产出（tools 节点回显 / 中间件注入节点）
+    3) 循环守卫注入的纠偏与中止消息（已通过 warning / error 事件单独呈现，避免重复展示）
+    """
+    if not getattr(token, "content", None):
+        return False
+
+    node_name = metadata.get("langgraph_node") if isinstance(metadata, dict) else None
+    if isinstance(node_name, str):
+        if node_name not in MODEL_NODE_NAMES:
+            return False
+    elif "ToolMessage" in type(token).__name__:
+        # 兼容 metadata 缺失的旧版本
+        return False
+
+    additional_kwargs = getattr(token, "additional_kwargs", None) or {}
+    if isinstance(additional_kwargs, dict) and additional_kwargs.get(
+        LOOP_GUARD_MARKER
+    ):
+        return False
+
+    return True
+
+
+def _limit_sse_tool_output(content: Any, summary: str) -> tuple[Any, str]:
+    """限制 tool_result 事件下发给前端的正文长度，避免大 JSON 阻塞浏览器"""
+    if isinstance(content, str) and len(content) > _MAX_SSE_TOOL_OUTPUT_CHARS:
+        return (
+            content[:_MAX_SSE_TOOL_OUTPUT_CHARS]
+            + f"\n...[已截断，共 {len(content)} 字符]",
+            summary,
+        )
+    return content, summary
+
+
+def _drain_loop_guard_events(session_id: str) -> List[Dict[str, Any]]:
+    """取出并在日志中记录本会话的循环守卫事件"""
+    events = get_loop_guard_bus().drain(session_id)
+    for event in events:
+        logger.warning(
+            "[LoopGuard] action=%s session_id=%s tool=%s repeat_count=%s",
+            event.get("kind"),
+            session_id,
+            event.get("tool"),
+            event.get("count"),
+        )
+    return events
+
+
 # ============== 统一响应辅助函数 ==============
 
 
@@ -141,34 +269,7 @@ _URL_LEADING_WRAP_CHARS = "([<{\"'“‘（【《「『"
 _URL_TRAILING_WRAP_CHARS = ")]}>\"'”’）】》」』.,;!?，。；！？、"
 _URL_HARD_STOP_CHARS = "\r\n\t ,;)}]>\"'，。；！？、：”’）】》」』"
 
-
-def _get_env_int(name: str, default: int, min_value: int = 1) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return max(min_value, int(raw))
-    except ValueError:
-        logger.warning(
-            "AgentLoopStreamAPI: Invalid int env %s=%s, fallback=%s", name, raw, default
-        )
-        return default
-
-
-def _get_env_float(name: str, default: float, min_value: float = 0.1) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return max(min_value, float(raw))
-    except ValueError:
-        logger.warning(
-            "AgentLoopStreamAPI: Invalid float env %s=%s, fallback=%s",
-            name,
-            raw,
-            default,
-        )
-        return default
+# `_get_env_int` / `_get_env_float` 已统一收敛到 loop_guard 模块，此处沿用同一实现。
 
 
 def _normalize_uploaded_image_base64_list(
@@ -213,6 +314,17 @@ _LINKED_IMAGE_FETCH_TIMEOUT = _get_env_float(
 _MAX_SAFE_TOOL_MESSAGE_CHARS = _get_env_int(
     "AGENT_LOOP_MAX_SAFE_TOOL_MESSAGE_CHARS", 20000, min_value=1000
 )
+# ToolMessage 截断策略：保留头尾而非整体替换为占位符，
+# 避免模型因「看不到工具结果」而重复调用同一工具。
+_TOOL_TRUNCATE_ENABLED = (
+    os.getenv("AGENT_LOOP_TOOL_TRUNCATE_ENABLED", "1").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+_TOOL_TRUNCATE_HEAD_RATIO = min(
+    0.9, _get_env_float("AGENT_LOOP_TOOL_TRUNCATE_HEAD_RATIO", 0.6, min_value=0.1)
+)
+# tool_result SSE 事件下发给前端的 tool_output 上限（避免大 JSON 打到浏览器）
+_MAX_SSE_TOOL_OUTPUT_CHARS = load_loop_guard_config().max_sse_tool_output_chars
 
 # ============== 弱模型 Agent Loop 调优（issue.md）==============
 # 弱模型（短上下文、工具调用准确率低）需更短的循环步数上限与更激进的 ToolMessage 截断，
@@ -505,23 +617,64 @@ def process_mcp_tool_output(content: Any) -> tuple:
     return content, summary
 
 
+_BINARY_IMAGE_CONTENT_RE = re.compile(r"data:image/(?P<mime>[\w.+-]+);base64,")
+
+
+def _describe_binary_image_content(content: str) -> str:
+    """把纯图片/base64 内容替换为结构化占位符（保留 mime 与体积信息）"""
+    match = _BINARY_IMAGE_CONTENT_RE.search(content)
+    mime = match.group("mime") if match else "unknown"
+    approx_kb = max(1, len(content) // 1024)
+    return (
+        f"[工具返回图片数据，已省略: mime=image/{mime}, 约 {approx_kb} KB；"
+        "如需图片请改用附件下载或截图上传接口]"
+    )
+
+
+def _sanitize_tool_message_content(msg: ToolMessage, safe_chars: int) -> Tuple[str, str]:
+    """
+    规范化单条 ToolMessage 的内容。
+
+    返回 (new_content, action)，action ∈ {"ok", "truncated", "binary", "invalid"}。
+
+    与旧实现的关键差异：超长文本不再整体替换为占位符，而是保留头尾关键信息。
+    原实现会让模型完全看不到工具结果，从而反复重试同一调用（死循环的正反馈来源）。
+    """
+    content = getattr(msg, "content", None)
+    if content is None or not isinstance(content, str):
+        return "", "invalid"
+    if not content:
+        return content, "ok"
+    # 纯图片/base64：文本形态对模型无用，整体替换但保留结构化信息
+    if _BINARY_IMAGE_CONTENT_RE.search(content) and len(content) > safe_chars:
+        return _describe_binary_image_content(content), "binary"
+    if _TOOL_TRUNCATE_ENABLED and len(content) > safe_chars:
+        return (
+            truncate_tool_content(content, safe_chars, _TOOL_TRUNCATE_HEAD_RATIO),
+            "truncated",
+        )
+    return content, "ok"
+
+
 def _build_sanitized_messages(
     messages: List[Any], tool_message_chars: int = _MAX_SAFE_TOOL_MESSAGE_CHARS
-) -> tuple[List[Any], int]:
+) -> tuple[List[Any], int, Dict[str, int]]:
     """
     构建合法的消息列表：
     1) 为缺失 ToolMessage 响应的 tool_call 插入占位 ToolMessage
     2) 清理悬空的 ToolMessage（无匹配 tool_call）
-    3) 清理有问题的 ToolMessage（content 非字符串 / 过长 / 含 base64）
+    3) 修复有问题的 ToolMessage（content 非字符串 / 过长 / 含 base64）
 
     Args:
         messages: 原始消息列表
         tool_message_chars: ToolMessage 内容安全上限（弱模型下调以更早截断大输出）
 
-    返回 (clean_messages, fix_count)
+    返回 (clean_messages, fix_count, stats)
+        stats 形如 {"truncated": n, "binary": n, "invalid": n}，供日志观测。
     """
     result: List[Any] = []
     fix_count = 0
+    stats: Dict[str, int] = {"truncated": 0, "binary": 0, "invalid": 0}
 
     safe_chars = max(1000, int(tool_message_chars or _MAX_SAFE_TOOL_MESSAGE_CHARS))
 
@@ -542,16 +695,6 @@ def _build_sanitized_messages(
             fix_count += 1
         pending_call_ids.clear()
         pending_call_names.clear()
-
-    def _is_tool_content_problematic(msg: ToolMessage) -> bool:
-        content = getattr(msg, "content", None)
-        if content is None or not isinstance(content, str):
-            return True
-        if len(content) > safe_chars:
-            return True
-        if "data:image/" in content and "base64," in content:
-            return True
-        return False
 
     for msg in messages:
         # 带 tool_calls 的 AIMessage
@@ -579,18 +722,33 @@ def _build_sanitized_messages(
             tc_id = str(getattr(msg, "tool_call_id", "") or "")
             if tc_id in pending_call_ids:
                 pending_call_ids.remove(tc_id)
-                if _is_tool_content_problematic(msg):
+                new_content, action = _sanitize_tool_message_content(msg, safe_chars)
+                if action == "ok":
+                    result.append(msg)
+                elif action == "invalid":
                     result.append(
                         ToolMessage(
-                            content="[Tool output removed: content was invalid or too large]",
+                            content=new_content
+                            or "[Tool output removed: content was not a string]",
                             tool_call_id=tc_id,
                             name=getattr(msg, "name", None)
                             or pending_call_names.get(tc_id, "unknown"),
                         )
                     )
+                    stats["invalid"] += 1
                     fix_count += 1
                 else:
-                    result.append(msg)
+                    # 超长文本 / 图片数据：保留可读信息后覆写
+                    result.append(
+                        ToolMessage(
+                            content=new_content,
+                            tool_call_id=tc_id,
+                            name=getattr(msg, "name", None)
+                            or pending_call_names.get(tc_id, "unknown"),
+                        )
+                    )
+                    stats[action] = stats.get(action, 0) + 1
+                    fix_count += 1
             else:
                 # 悬空 ToolMessage，丢弃
                 fix_count += 1
@@ -601,7 +759,7 @@ def _build_sanitized_messages(
         result.append(msg)
 
     _flush_pending()
-    return result, fix_count
+    return result, fix_count, stats
 
 
 async def _sanitize_history_before_model_call(
@@ -631,7 +789,9 @@ async def _sanitize_history_before_model_call(
     if not messages:
         return {"removed_count": 0, "sanitized": False}
 
-    clean_msgs, fix_count = _build_sanitized_messages(messages, tool_message_chars)
+    clean_msgs, fix_count, stats = _build_sanitized_messages(
+        messages, tool_message_chars
+    )
     if fix_count == 0:
         return {"removed_count": 0, "sanitized": False}
 
@@ -656,9 +816,13 @@ async def _sanitize_history_before_model_call(
                 )
             success = True
             logger.info(
-                "%s: Sanitized history via REMOVE_ALL, fixed %d issues, %d clean messages (as_node=%s)",
+                "%s: Sanitized history via REMOVE_ALL, fixed %d issues "
+                "(truncated=%d, binary=%d, invalid=%d), %d clean messages (as_node=%s)",
                 log_prefix,
                 fix_count,
+                stats.get("truncated", 0),
+                stats.get("binary", 0),
+                stats.get("invalid", 0),
                 len(clean_msgs),
                 as_node or "auto",
             )
@@ -811,8 +975,8 @@ class AgentLoopStreamAPIView(View):
       - stream=false：返回普通 JSON 响应
     """
 
-    # 最大步骤数（用于前端显示）
-    MAX_STEPS = 500
+    # 前端展示的步数上限由 `recursion_limit // 2` 动态推导（见 max_steps_display），
+    # 不再使用固定常量，避免与模型分层配置、前端兜底值三者不一致。
 
     def _update_session_token_usage(
         self, session_id: str, input_tokens: int, output_tokens: int,
@@ -922,11 +1086,21 @@ class AgentLoopStreamAPIView(View):
         tool_message_chars = (
             _WEAK_MODEL_TOOL_MESSAGE_CHARS if is_weak_model else _MAX_SAFE_TOOL_MESSAGE_CHARS
         )
+        # 每轮工具调用消耗 2 个 superstep（model + tools），用于前端展示步数上限。
+        # 与 step_start 事件、start 事件共用同一取值，避免三处不一致。
+        max_steps_display = max(1, recursion_limit // 2)
+        loop_guard_config = load_loop_guard_config()
         logger.info(
-            "AgentLoopStreamAPI: model_tier=%s, recursion_limit=%d, tool_message_chars=%d",
+            "AgentLoopStreamAPI: model_tier=%s, recursion_limit=%d, max_steps=%d, "
+            "tool_message_chars=%d, loop_guard(enabled=%s, warn=%d, abort=%d, window=%d)",
             model_tier,
             recursion_limit,
+            max_steps_display,
             tool_message_chars,
+            loop_guard_config.enabled,
+            loop_guard_config.warn,
+            loop_guard_config.abort,
+            loop_guard_config.window,
         )
 
         # 2. 验证多模态支持
@@ -1099,6 +1273,7 @@ class AgentLoopStreamAPIView(View):
                     "project_id": project_id,
                     "display_message": display_user_message,
                     "mode": "agent_loop",
+                    "max_steps": max_steps_display,
                     "created_at": chat_session.created_at.isoformat()
                     if chat_session and chat_session.created_at
                     else None,
@@ -1128,6 +1303,13 @@ class AgentLoopStreamAPIView(View):
                 logger.info(
                     f"AgentLoopStreamAPI: Agent created with {len(tools)} tools"
                 )
+                # 常驻打印真实节点名，便于上游 langchain 版本变更时快速定位
+                # 「step 事件静默失效」类问题（v1 节点名为 model/tools）
+                logger.info(
+                    "AgentLoopStreamAPI: agent nodes=%s, middleware=%s",
+                    sorted(getattr(agent, "nodes", {}) or {}),
+                    [type(m).__name__ for m in middleware],
+                )
 
                 # 13. 配置调用参数
                 invoke_config = {
@@ -1152,8 +1334,20 @@ class AgentLoopStreamAPIView(View):
                 interrupt_detected = False
                 user_stopped = False
 
+                # 14.1 死循环守卫状态
+                # 主力守卫是 LoopGuardMiddleware（可注入纠偏消息并干净结束图）；
+                # 这里维护一份独立的兜底计数器，即使中间件被关闭或失效也能止损。
+                loop_aborted = False
+                loop_abort_tool: Optional[str] = None
+                loop_abort_count = 0
+                loop_abort_message = ""
+                fallback_steps: List[ToolStep] = []
+
                 # 15. 流式执行
                 stream_modes = ["updates", "messages"]
+
+                # 15.1 清理上一轮可能残留的守卫事件，避免污染本轮
+                _drain_loop_guard_events(session_id)
 
                 try:
                     async for stream_mode, chunk in agent.astream(
@@ -1176,6 +1370,29 @@ class AgentLoopStreamAPIView(View):
                             break
 
                         if stream_mode == "updates":
+                            # 循环守卫事件（LoopGuardMiddleware 在模型调用前推送）
+                            for guard_event in _drain_loop_guard_events(session_id):
+                                if guard_event.get("kind") == LOOP_GUARD_ABORT:
+                                    loop_aborted = True
+                                    loop_abort_tool = guard_event.get("tool")
+                                    loop_abort_count = int(
+                                        guard_event.get("count") or 0
+                                    )
+                                    loop_abort_message = (
+                                        guard_event.get("message") or ""
+                                    )
+                                elif guard_event.get("kind") == LOOP_GUARD_WARN:
+                                    yield create_sse_data(
+                                        {
+                                            "type": "warning",
+                                            "code": "loop_guard_warn",
+                                            "message": guard_event.get("message")
+                                            or "检测到重复工具调用，已注入纠偏提示",
+                                            "tool": guard_event.get("tool"),
+                                            "count": guard_event.get("count"),
+                                        }
+                                    )
+
                             # 检查中断事件 (HITL)
                             if isinstance(chunk, dict) and "__interrupt__" in chunk:
                                 interrupt_info = chunk["__interrupt__"]
@@ -1315,7 +1532,7 @@ class AgentLoopStreamAPIView(View):
                             # 检测工具调用开始（用于生成 step_start 事件）
                             elif isinstance(chunk, dict):
                                 for node_name, node_output in chunk.items():
-                                    if node_name == "agent" and isinstance(
+                                    if node_name in MODEL_NODE_NAMES and isinstance(
                                         node_output, dict
                                     ):
                                         messages = node_output.get("messages", [])
@@ -1327,17 +1544,14 @@ class AgentLoopStreamAPIView(View):
                                                 # 新的工具调用 -> 新步骤开始
                                                 step_count += 1
                                                 current_tool_calls = msg.tool_calls
-                                                tool_names_in_step = [
-                                                    tc.get("name", "unknown")
-                                                    if isinstance(tc, dict)
-                                                    else getattr(tc, "name", "unknown")
-                                                    for tc in current_tool_calls
-                                                ]
+                                                tool_names_in_step = _cli_tool_names(
+                                                    current_tool_calls
+                                                )
                                                 yield create_sse_data(
                                                     {
                                                         "type": "step_start",
                                                         "step": step_count,
-                                                        "max_steps": recursion_limit // 2,
+                                                        "max_steps": max_steps_display,
                                                         "tools": tool_names_in_step,
                                                     }
                                                 )
@@ -1345,7 +1559,50 @@ class AgentLoopStreamAPIView(View):
                                                     f"AgentLoopStreamAPI: Step {step_count} started with tools: {tool_names_in_step}"
                                                 )
 
-                                    elif node_name == "tools" and isinstance(
+                                                # 兜底计数器：逐步累计工具调用步，
+                                                # 与中间件共享同一套判定规则
+                                                signatures = step_signatures(msg)
+                                                if signatures:
+                                                    fallback_steps.append(
+                                                        ToolStep(signatures=signatures)
+                                                    )
+                                        if fallback_steps:
+                                            repeats = count_trailing_repeats(
+                                                fallback_steps,
+                                                require_same_result=loop_guard_config.require_same_result,
+                                            )
+                                            if (
+                                                repeats >= loop_guard_config.abort
+                                                and not loop_aborted
+                                            ):
+                                                loop_aborted = True
+                                                loop_abort_tool = ", ".join(
+                                                    sorted(
+                                                        {
+                                                            s.split("::", 1)[0]
+                                                            for s in fallback_steps[
+                                                                -1
+                                                            ].signatures
+                                                        }
+                                                    )
+                                                )
+                                                loop_abort_count = repeats
+                                                loop_abort_message = (
+                                                    f"检测到工具 {loop_abort_tool} 连续 "
+                                                    f"{repeats} 次以完全相同参数调用且返回结果一致，"
+                                                    "已中止本轮执行（工具调用死循环）。"
+                                                    "建议调整查询参数或缩小需求范围后重试。"
+                                                )
+                                                logger.warning(
+                                                    "[LoopGuard] action=abort(source=stream_fallback) "
+                                                    "session_id=%s tool=%s repeat_count=%s",
+                                                    session_id,
+                                                    loop_abort_tool,
+                                                    repeats,
+                                                )
+                                                break
+
+                                    elif node_name == TOOL_NODE_NAME and isinstance(
                                         node_output, dict
                                     ):
                                         # 工具执行完成
@@ -1359,9 +1616,23 @@ class AgentLoopStreamAPIView(View):
                                                     tool_msg, "tool_name", "unknown"
                                                 )
 
+                                                # 兜底计数器：记录本步工具返回摘要
+                                                digest = content_digest(tool_msg)
+                                                if fallback_steps and digest:
+                                                    last_step = fallback_steps[-1]
+                                                    last_step.result_digests = (
+                                                        last_step.result_digests
+                                                        + (digest,)
+                                                    )
+
                                                 # 使用辅助函数处理 MCP 工具输出
                                                 content, summary = (
                                                     process_mcp_tool_output(content)
+                                                )
+                                                content, summary = (
+                                                    _limit_sse_tool_output(
+                                                        content, summary
+                                                    )
                                                 )
 
                                                 yield create_sse_data(
@@ -1382,28 +1653,43 @@ class AgentLoopStreamAPIView(View):
                                                 }
                                             )
 
+                                if loop_aborted:
+                                    break
+
                         elif stream_mode == "messages":
                             # LLM Token 流式输出
                             # messages 模式返回元组 (token, metadata)
                             if isinstance(chunk, tuple) and len(chunk) >= 1:
                                 token = chunk[0]
-                                # 只发送 AI 消息，过滤掉 ToolMessage（工具结果已通过 tool_result 事件发送）
-                                if hasattr(token, "content") and token.content:
-                                    # 检查是否是 ToolMessage（通过类名或 type 属性）
-                                    token_type = type(token).__name__
-                                    if "ToolMessage" not in token_type:
-                                        yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
-                                        )
-                            elif hasattr(chunk, "content") and chunk.content:
-                                # 兼容旧版本可能直接返回 message 的情况
-                                # 同样过滤掉 ToolMessage
-                                chunk_type = type(chunk).__name__
-                                if "ToolMessage" not in chunk_type:
+                                metadata = chunk[1] if len(chunk) > 1 else None
+                                # 只发送模型节点产出的正文：过滤 ToolMessage、
+                                # 中间件节点以及守卫注入的纠偏/中止消息
+                                if _is_streamable_token(token, metadata):
                                     yield create_sse_data(
-                                        {"type": "stream", "data": chunk.content}
+                                        {"type": "stream", "data": token.content}
                                     )
+                            elif _is_streamable_token(chunk, None):
+                                # 兼容旧版本可能直接返回 message 的情况
+                                yield create_sse_data(
+                                    {"type": "stream", "data": chunk.content}
+                                )
 
+                except GraphRecursionError:
+                    # 守卫未能提前止损时的最后一道防线：给出可读的中止说明，
+                    # 而不是把 langgraph 的原始 Recursion limit 报错抛给用户
+                    logger.warning(
+                        "[LoopGuard] action=abort(source=recursion_limit) session_id=%s "
+                        "thread_id=%s recursion_limit=%s step_count=%s",
+                        session_id,
+                        thread_id,
+                        recursion_limit,
+                        step_count,
+                    )
+                    yield create_sse_data(
+                        _build_recursion_limit_error_event(
+                            recursion_limit=recursion_limit, step_count=step_count
+                        )
+                    )
                 except Exception as e:
                     friendly_error = get_user_friendly_llm_error(e)
                     if friendly_error:
@@ -1497,9 +1783,34 @@ class AgentLoopStreamAPIView(View):
                     except Exception as summarize_err:
                         logger.error(f"AgentLoopStreamAPI: Failed to auto-summarize title: {summarize_err}", exc_info=True)
 
+                # 收尾兜底：捕获最后一个 superstep 中推送的守卫事件
+                # （中间件的 abort 会自然结束图，无需在此 break）
+                if not loop_aborted:
+                    for guard_event in _drain_loop_guard_events(session_id):
+                        if guard_event.get("kind") == LOOP_GUARD_ABORT:
+                            loop_aborted = True
+                            loop_abort_tool = guard_event.get("tool")
+                            loop_abort_count = int(guard_event.get("count") or 0)
+                            loop_abort_message = guard_event.get("message") or ""
+
                 if user_stopped:
                     yield create_sse_data(
                         {"type": "complete", "status": "stopped", "steps": step_count}
+                    )
+                elif loop_aborted:
+                    # 复用 error 事件承载中止说明：前端会把 message 渲染成
+                    # 一条 AI 气泡并置为结束态，无需改动前端
+                    yield create_sse_data(
+                        _build_loop_abort_error_event(
+                            tool=loop_abort_tool,
+                            count=loop_abort_count,
+                            message=loop_abort_message
+                            or (
+                                f"检测到工具 {loop_abort_tool or 'unknown'} 连续 "
+                                f"{loop_abort_count} 次以完全相同参数调用且返回结果一致，"
+                                "已中止本轮执行（工具调用死循环）。"
+                            ),
+                        )
                     )
                 elif interrupt_detected:
                     logger.info(
@@ -1753,7 +2064,10 @@ class AgentLoopStreamAPIView(View):
                         elif event_type == "error":
                             error_message = event.get("message", "Unknown error")
                             error_status_code = event.get("code", 500)
-                            error_details = event.get("errors")
+                            error_details = event.get("errors") or {
+                                "detail": [error_message],
+                                "error_code": event.get("error_code"),
+                            }
                         elif event_type == "interrupt":
                             interrupt_info = {
                                 "interrupt_id": event.get("interrupt_id"),
@@ -1876,8 +2190,7 @@ class AgentLoopResumeAPIView(View):
     这样前端可以像处理主流一样处理 resume 后的工具执行和 LLM 响应。
     """
 
-    # 最大步骤数（与主流保持一致）
-    MAX_STEPS = 500
+    # 前端展示的步数上限同样由 `resume_recursion_limit // 2` 动态推导
 
     async def authenticate_request(self, request):
         """JWT 认证（复用 AgentLoopStreamAPIView 的逻辑）"""
@@ -1973,11 +2286,22 @@ class AgentLoopResumeAPIView(View):
                     if resume_is_weak
                     else _MAX_SAFE_TOOL_MESSAGE_CHARS
                 )
+                # 与主视图保持一致：前端展示步数上限由 recursion_limit // 2 推导，
+                # step_start / start 事件共用同一取值，避免多处不一致
+                resume_max_steps_display = max(1, resume_recursion_limit // 2)
+                resume_loop_guard_config = load_loop_guard_config()
                 logger.info(
-                    "AgentLoopResumeAPI: model_tier=%s, recursion_limit=%d, tool_message_chars=%d",
+                    "AgentLoopResumeAPI: model_tier=%s, recursion_limit=%d, "
+                    "max_steps=%d, tool_message_chars=%d, "
+                    "loop_guard(enabled=%s, warn=%d, abort=%d, window=%d)",
                     resume_model_tier,
                     resume_recursion_limit,
+                    resume_max_steps_display,
                     resume_tool_message_chars,
+                    resume_loop_guard_config.enabled,
+                    resume_loop_guard_config.warn,
+                    resume_loop_guard_config.abort,
+                    resume_loop_guard_config.window,
                 )
 
                 # 4. 加载工具
@@ -2077,11 +2401,24 @@ class AgentLoopResumeAPIView(View):
                 )
 
                 # 6. 创建 agent
+                # 修复 D8：resume 分支此前遗漏 system_prompt，导致恢复执行时
+                # 缺少系统提示词与工具约束，行为与主视图不一致
                 agent = create_agent(
                     llm,
                     tools,
+                    system_prompt=resume_system_prompt,
                     checkpointer=checkpointer,
                     middleware=middleware,
+                )
+                logger.info(
+                    f"AgentLoopResumeAPI: Agent created with {len(tools)} tools"
+                )
+                # 常驻打印真实节点名，便于上游 langchain 版本变更时快速定位
+                # 「step 事件静默失效」类问题（v1 节点名为 model/tools）
+                logger.info(
+                    "AgentLoopResumeAPI: agent nodes=%s, middleware=%s",
+                    sorted(getattr(agent, "nodes", {}) or {}),
+                    [type(m).__name__ for m in middleware],
                 )
 
                 thread_id = (
@@ -2108,12 +2445,46 @@ class AgentLoopResumeAPIView(View):
                 step_count = 0
                 interrupt_detected = False
 
+                # 8.1 死循环守卫状态（与主视图保持一致）
+                # 主力守卫是 LoopGuardMiddleware；这里维护一份独立兜底计数器，
+                # 即使中间件被关闭或失效也能止损。
+                loop_aborted = False
+                loop_abort_tool: Optional[str] = None
+                loop_abort_count = 0
+                loop_abort_message = ""
+                fallback_steps: List[ToolStep] = []
+
                 # 9. 流式执行
+                # 清理上一轮可能残留的守卫事件，避免污染本轮
+                _drain_loop_guard_events(session_id)
                 try:
                     async for stream_mode, chunk in agent.astream(
                         command, config=config, stream_mode=["updates", "messages"]
                     ):
                         if stream_mode == "updates":
+                            # 循环守卫事件（LoopGuardMiddleware 在模型调用前推送）
+                            for guard_event in _drain_loop_guard_events(session_id):
+                                if guard_event.get("kind") == LOOP_GUARD_ABORT:
+                                    loop_aborted = True
+                                    loop_abort_tool = guard_event.get("tool")
+                                    loop_abort_count = int(
+                                        guard_event.get("count") or 0
+                                    )
+                                    loop_abort_message = (
+                                        guard_event.get("message") or ""
+                                    )
+                                elif guard_event.get("kind") == LOOP_GUARD_WARN:
+                                    yield create_sse_data(
+                                        {
+                                            "type": "warning",
+                                            "code": "loop_guard_warn",
+                                            "message": guard_event.get("message")
+                                            or "检测到重复工具调用，已注入纠偏提示",
+                                            "tool": guard_event.get("tool"),
+                                            "count": guard_event.get("count"),
+                                        }
+                                    )
+
                             # 检查中断事件 (HITL) - resume 后可能又触发新的中断
                             if isinstance(chunk, dict) and "__interrupt__" in chunk:
                                 interrupt_info = chunk["__interrupt__"]
@@ -2213,7 +2584,7 @@ class AgentLoopResumeAPIView(View):
                             # 检测工具调用开始
                             elif isinstance(chunk, dict):
                                 for node_name, node_output in chunk.items():
-                                    if node_name == "agent" and isinstance(
+                                    if node_name in MODEL_NODE_NAMES and isinstance(
                                         node_output, dict
                                     ):
                                         messages = node_output.get("messages", [])
@@ -2223,22 +2594,62 @@ class AgentLoopResumeAPIView(View):
                                                 and msg.tool_calls
                                             ):
                                                 step_count += 1
-                                                tool_names_in_step = [
-                                                    tc.get("name", "unknown")
-                                                    if isinstance(tc, dict)
-                                                    else getattr(tc, "name", "unknown")
-                                                    for tc in msg.tool_calls
-                                                ]
+                                                tool_names_in_step = _cli_tool_names(
+                                                    msg.tool_calls
+                                                )
                                                 yield create_sse_data(
                                                     {
                                                         "type": "step_start",
                                                         "step": step_count,
-                                                        "max_steps": resume_recursion_limit // 2,
+                                                        "max_steps": resume_max_steps_display,
                                                         "tools": tool_names_in_step,
                                                     }
                                                 )
 
-                                    elif node_name == "tools" and isinstance(
+                                                # 兜底计数器：逐步累计工具调用步，
+                                                # 与中间件共享同一套判定规则
+                                                signatures = step_signatures(msg)
+                                                if signatures:
+                                                    fallback_steps.append(
+                                                        ToolStep(signatures=signatures)
+                                                    )
+                                        if fallback_steps:
+                                            repeats = count_trailing_repeats(
+                                                fallback_steps,
+                                                require_same_result=resume_loop_guard_config.require_same_result,
+                                            )
+                                            if (
+                                                repeats >= resume_loop_guard_config.abort
+                                                and not loop_aborted
+                                            ):
+                                                loop_aborted = True
+                                                loop_abort_tool = ", ".join(
+                                                    sorted(
+                                                        {
+                                                            s.split("::", 1)[0]
+                                                            for s in fallback_steps[
+                                                                -1
+                                                            ].signatures
+                                                        }
+                                                    )
+                                                )
+                                                loop_abort_count = repeats
+                                                loop_abort_message = (
+                                                    f"检测到工具 {loop_abort_tool} 连续 "
+                                                    f"{repeats} 次以完全相同参数调用且返回结果一致，"
+                                                    "已中止本轮执行（工具调用死循环）。"
+                                                    "建议调整查询参数或缩小需求范围后重试。"
+                                                )
+                                                logger.warning(
+                                                    "[LoopGuard] action=abort(source=stream_fallback) "
+                                                    "session_id=%s tool=%s repeat_count=%s",
+                                                    session_id,
+                                                    loop_abort_tool,
+                                                    repeats,
+                                                )
+                                                break
+
+                                    elif node_name == TOOL_NODE_NAME and isinstance(
                                         node_output, dict
                                     ):
                                         tool_messages = node_output.get("messages", [])
@@ -2251,9 +2662,23 @@ class AgentLoopResumeAPIView(View):
                                                     tool_msg, "tool_name", "unknown"
                                                 )
 
+                                                # 兜底计数器：记录本步工具返回摘要
+                                                digest = content_digest(tool_msg)
+                                                if fallback_steps and digest:
+                                                    last_step = fallback_steps[-1]
+                                                    last_step.result_digests = (
+                                                        last_step.result_digests
+                                                        + (digest,)
+                                                    )
+
                                                 # 使用辅助函数处理 MCP 工具输出
                                                 content, summary = (
                                                     process_mcp_tool_output(content)
+                                                )
+                                                content, summary = (
+                                                    _limit_sse_tool_output(
+                                                        content, summary
+                                                    )
                                                 )
 
                                                 yield create_sse_data(
@@ -2273,28 +2698,44 @@ class AgentLoopResumeAPIView(View):
                                                 }
                                             )
 
+                                if loop_aborted:
+                                    break
+
                         elif stream_mode == "messages":
                             # LLM Token 流式输出
                             # messages 模式返回元组 (token, metadata)
                             if isinstance(chunk, tuple) and len(chunk) >= 1:
                                 token = chunk[0]
-                                # 只发送 AI 消息，过滤掉 ToolMessage（工具结果已通过 tool_result 事件发送）
-                                if hasattr(token, "content") and token.content:
-                                    # 检查是否是 ToolMessage（通过类名或 type 属性）
-                                    token_type = type(token).__name__
-                                    if "ToolMessage" not in token_type:
-                                        yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
-                                        )
-                            elif hasattr(chunk, "content") and chunk.content:
-                                # 兼容旧版本可能直接返回 message 的情况
-                                # 同样过滤掉 ToolMessage
-                                chunk_type = type(chunk).__name__
-                                if "ToolMessage" not in chunk_type:
+                                metadata = chunk[1] if len(chunk) > 1 else None
+                                # 只发送模型节点产出的正文：过滤 ToolMessage、
+                                # 中间件节点以及守卫注入的纠偏/中止消息
+                                if _is_streamable_token(token, metadata):
                                     yield create_sse_data(
-                                        {"type": "stream", "data": chunk.content}
+                                        {"type": "stream", "data": token.content}
                                     )
+                            elif _is_streamable_token(chunk, None):
+                                # 兼容旧版本可能直接返回 message 的情况
+                                yield create_sse_data(
+                                    {"type": "stream", "data": chunk.content}
+                                )
 
+                except GraphRecursionError:
+                    # 守卫未能提前止损时的最后一道防线：给出可读的中止说明，
+                    # 而不是把 langgraph 的原始 Recursion limit 报错抛给用户
+                    logger.warning(
+                        "[LoopGuard] action=abort(source=recursion_limit) session_id=%s "
+                        "thread_id=%s recursion_limit=%s step_count=%s",
+                        session_id,
+                        thread_id,
+                        resume_recursion_limit,
+                        step_count,
+                    )
+                    yield create_sse_data(
+                        _build_recursion_limit_error_event(
+                            recursion_limit=resume_recursion_limit,
+                            step_count=step_count,
+                        )
+                    )
                 except Exception as e:
                     friendly_error = get_user_friendly_llm_error(e)
                     if friendly_error:
@@ -2366,7 +2807,32 @@ class AgentLoopResumeAPIView(View):
                         f"AgentLoopResumeAPI: Failed to calculate token count: {e}"
                     )
 
-                if interrupt_detected:
+                # 收尾兜底：捕获最后一个 superstep 中推送的守卫事件
+                # （中间件的 abort 会自然结束图，无需在此 break）
+                if not loop_aborted:
+                    for guard_event in _drain_loop_guard_events(session_id):
+                        if guard_event.get("kind") == LOOP_GUARD_ABORT:
+                            loop_aborted = True
+                            loop_abort_tool = guard_event.get("tool")
+                            loop_abort_count = int(guard_event.get("count") or 0)
+                            loop_abort_message = guard_event.get("message") or ""
+
+                if loop_aborted:
+                    # 复用 error 事件承载中止说明：前端会把 message 渲染成
+                    # 一条 AI 气泡并置为结束态，无需改动前端
+                    yield create_sse_data(
+                        _build_loop_abort_error_event(
+                            tool=loop_abort_tool,
+                            count=loop_abort_count,
+                            message=loop_abort_message
+                            or (
+                                f"检测到工具 {loop_abort_tool or 'unknown'} 连续 "
+                                f"{loop_abort_count} 次以完全相同参数调用且返回结果一致，"
+                                "已中止本轮执行（工具调用死循环）。"
+                            ),
+                        )
+                    )
+                elif interrupt_detected:
                     logger.info(
                         "AgentLoopResumeAPI: New interrupt detected after resume"
                     )

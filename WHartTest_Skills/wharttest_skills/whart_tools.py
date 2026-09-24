@@ -214,11 +214,14 @@ def get_testcases(project_id: int, module_id: int, page: int = 1):
         resp = requests.get(url, headers=_headers())
         resp.raise_for_status()
         data = resp.json().get("data", {})
-        # data = data.get("results", [])
         # return [{"case_id": i.get("id"), "case_name": i.get("name")} for i in data]
+        results = data.get("results", [])
+        if not  results:
+            return {"error": "用例列表为空"}
         return data
     except Exception as e:
-        return {"error": str(e)}
+        # return {"error": str(e)}
+        return {"error": f"用例列表不存在"}
 
 
 def get_testcase_detail(project_id: int, case_id: int):
@@ -229,7 +232,8 @@ def get_testcase_detail(project_id: int, case_id: int):
         resp.raise_for_status()
         return resp.json().get("data", {})
     except Exception as e:
-        return {"error": str(e)}
+        # return {"error": str(e)}
+        return {"error": f"用例不存在"}
 
 
 def add_testcase(project_id: int, module_id: int, name: str, level: str = "P1",

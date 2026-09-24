@@ -15,13 +15,16 @@ import json
 import time
 import mimetypes
 import re
-from typing import Optional
+import hashlib
+from collections import OrderedDict
+from typing import Optional, Tuple
 
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
 
 from .output_sanitizer import strip_terminal_control_sequences
 from .persistent_playwright import PlaywrightSessionManager, extract_runjs_args
+from ..loop_guard import _get_env_bool, _get_env_int
 
 logger = logging.getLogger("orchestrator_integration")
 
@@ -58,6 +61,158 @@ _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
     r"[`'\"](?P<path>[^`'\"]+?\.(?:drawio|png|jpe?g|gif|svg|pdf|html?|txt|json|csv|xml|zip|docx?|xlsx?|pptx?))[`'\"]",
     re.IGNORECASE,
 )
+
+
+# ============== Skill 命令重复调用拦截 ==============
+#
+# 弱模型（如 qwen3-coder）在工具返回空结果时会以完全相同的参数反复调用同一命令，
+# 表现为「工具调用死循环」。这里按「会话 + Skill + 命令」维度做短期缓存：
+# 允许前 N 次真实执行，之后直接返回上次结果并明确提示「请勿重复调用」，
+# 既避免每次都起新子进程，也让模型明确看到「该调用已被拦截」这一信号。
+
+_SKILL_DEDUP_ENABLED = _get_env_bool("SKILL_TOOL_DEDUP_ENABLED", True)
+# 允许真实执行的重复次数上限（第 N+1 次起短路）
+_SKILL_DEDUP_MIN_REPEAT = _get_env_int("SKILL_TOOL_DEDUP_MIN_REPEAT", 2, min_value=1)
+_SKILL_DEDUP_TTL_SECONDS = _get_env_int(
+    "SKILL_TOOL_DEDUP_TTL_SECONDS", 120, min_value=1
+)
+_SKILL_DEDUP_MAX_ENTRIES = _get_env_int(
+    "SKILL_TOOL_DEDUP_MAX_ENTRIES", 256, min_value=8
+)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+_SKILL_ACTION_RE = re.compile(r"--action[=\s]+(?P<action>[A-Za-z0-9_]+)")
+# 只读 action 前缀：这些命令不改状态，重复执行结果一致，可安全短路
+_READ_ONLY_ACTION_PREFIXES = (
+    "get_",
+    "list_",
+    "read_",
+    "query_",
+    "search_",
+    "check_",
+    "obtain_",
+    "validate_",
+    "preview_",
+    "download_",
+)
+
+
+class _SkillCallCache:
+    """线程安全的会话级命令缓存（LRU + TTL）"""
+
+    def __init__(self, ttl_seconds: int, max_entries: int):
+        self._ttl = ttl_seconds
+        self._max_entries = max_entries
+        self._entries: "OrderedDict[str, dict]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _prune_expired(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self._entries.items()
+            if now - entry["last_at"] > self._ttl
+        ]
+        for key in expired:
+            self._entries.pop(key, None)
+
+    def touch(self, key: str) -> Tuple[int, Optional[str], float]:
+        """
+        记录一次调用。
+
+        返回 (本次是第几次调用, 上次结果, 距上次调用的秒数)；
+        缓存已过期或首次调用时，上次结果与间隔为 None / 0。
+        """
+        now = time.time()
+        with self._lock:
+            self._prune_expired(now)
+            entry = self._entries.get(key)
+            if entry is None:
+                self._entries[key] = {
+                    "count": 1,
+                    "result": None,
+                    "first_at": now,
+                    "last_at": now,
+                }
+                self._trim()
+                return 1, None, 0.0
+
+            age = now - entry["last_at"]
+            entry["count"] += 1
+            entry["last_at"] = now
+            self._entries.move_to_end(key)
+            return entry["count"], entry.get("result"), age
+
+    def store(self, key: str, result: str) -> None:
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self._entries[key] = {
+                    "count": 1,
+                    "result": result,
+                    "first_at": now,
+                    "last_at": now,
+                }
+            else:
+                entry["result"] = result
+                entry["last_at"] = now
+                self._entries.move_to_end(key)
+            self._trim()
+
+    def _trim(self) -> None:
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)
+
+    def clear(self, key_prefix: str = "") -> None:
+        with self._lock:
+            if not key_prefix:
+                self._entries.clear()
+                return
+            for key in [k for k in self._entries if k.startswith(key_prefix)]:
+                self._entries.pop(key, None)
+
+
+_skill_call_cache = _SkillCallCache(
+    ttl_seconds=_SKILL_DEDUP_TTL_SECONDS,
+    max_entries=_SKILL_DEDUP_MAX_ENTRIES,
+)
+
+
+def _is_read_only_skill_command(command: str) -> bool:
+    """依据 `--action` 判定是否为只读命令（写命令一律不短路）"""
+    match = _SKILL_ACTION_RE.search(command or "")
+    if not match:
+        return False
+    action = (match.group("action") or "").strip().lower()
+    return action.startswith(_READ_ONLY_ACTION_PREFIXES)
+
+
+def _build_skill_dedup_key(
+    session_scope: str, skill_name: str, command: str
+) -> str:
+    normalized = _WHITESPACE_RE.sub(" ", (command or "").strip())
+    digest = hashlib.sha1(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"{session_scope}::{skill_name}::{digest}"
+
+
+def _build_repeat_short_circuit_notice(
+    *, skill_name: str, count: int, age_seconds: float, cached_result: str
+) -> str:
+    return (
+        f"[重复调用拦截] 该命令（Skill: {skill_name}）已在最近 "
+        f"{int(age_seconds)} 秒内以完全相同的参数调用 {count - 1} 次，结果未发生变化。"
+        "框架已阻止重复执行，直接返回上次结果。\n"
+        "请立即停止重复调用本命令，改为：调整参数（更换 action / 分页 / 查询范围）、"
+        "基于已有结果继续下一步，或直接输出结论/说明阻塞原因。\n"
+        f"原始结果:\n{cached_result}"
+    )
+
+
+def _build_repeat_reminder_prefix(count: int) -> str:
+    return (
+        f"[重复提醒] 该命令与之前第 {count - 1} 次调用参数完全相同，已再次执行；"
+        "若属无意重复，请停止重复调用。\n"
+    )
 
 
 def _sanitize_runtime_path_segment(value: Optional[str], default: str) -> str:
@@ -521,6 +676,31 @@ def get_skill_tools(
         """内部函数：执行单条 Skill 命令"""
         from skills.models import Skill
 
+        # 重复调用拦截：按「会话 + Skill + 命令」统计，只影响只读命令
+        dedup_key = ""
+        occurrence = 1
+        if _SKILL_DEDUP_ENABLED:
+            session_scope = current_chat_session_id or f"project:{current_project_id}"
+            dedup_key = _build_skill_dedup_key(session_scope, skill_name, command)
+            occurrence, cached_result, cached_age = _skill_call_cache.touch(dedup_key)
+            if (
+                _is_read_only_skill_command(command)
+                and cached_result is not None
+                and occurrence > _SKILL_DEDUP_MIN_REPEAT
+            ):
+                logger.warning(
+                    "[execute_skill_script] 重复调用拦截 skill=%s occurrence=%d age=%.0fs",
+                    skill_name,
+                    occurrence,
+                    cached_age,
+                )
+                return _build_repeat_short_circuit_notice(
+                    skill_name=skill_name,
+                    count=occurrence,
+                    age_seconds=cached_age,
+                    cached_result=cached_result,
+                )
+
         logger.info(
             f"[execute_skill_script] skill_name={skill_name}, command={command}"
         )
@@ -747,6 +927,14 @@ def get_skill_tools(
                 result_output = f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}\n\n[注意] 此次执行未使用 session_id，浏览器已关闭。如果这是多步骤测试的一部分，请在后续调用中使用 session_id 参数保持浏览器会话。"
             elif skill_name == "playwright-skill":
                 result_output = f"[SCREENSHOT_DIR] {screenshots_dir}\n{result_output}"
+            elif occurrence > 1:
+                # 写命令不短路，但要让模型明确看到「这是重复调用」
+                result_output = (
+                    _build_repeat_reminder_prefix(occurrence) + result_output
+                )
+
+            if dedup_key:
+                _skill_call_cache.store(dedup_key, result_output)
 
             return _finalize_skill_result(
                 result_output,
