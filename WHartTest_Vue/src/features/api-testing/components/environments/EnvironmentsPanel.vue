@@ -165,6 +165,8 @@ const handleCreate = async () => {
     if (formData.database_config == ("null" as any)) {
       formData.database_config = null;
     }
+    // 客户端证书：只接受数字主键；其余（含 "null"/""/undefined 哨兵及 Arco 回退出的展示文案）一律置空
+    formData.client_certificate = typeof formData.client_certificate === 'number' ? formData.client_certificate : null;
 
     const response = await createEnvironment(formData)
 
@@ -413,6 +415,9 @@ const handleEditSubmit = async () => {
     if (formData.database_config == ("null" as any)) {
       formData.database_config = null
     }
+
+    // 客户端证书：只接受数字主键；其余（含 "null"/""/undefined 哨兵及 Arco 回退出的展示文案）一律置空
+    formData.client_certificate = typeof formData.client_certificate === 'number' ? formData.client_certificate : null;
 
     // 移除不需要提交的字段
     delete (formData as any).database_config_info

@@ -751,7 +751,10 @@ const handleSubmit = async () => {
                         {{ loadingClientCertificates ? formText.loadingClientCertificates : formText.noClientCertificates }}
                       </div>
                     </template>
-                    <a-option :value="null" :label="formText.noLinkedCertificate">{{ formText.noLinkedCertificate }}</a-option>
+                    <!-- 必须用字符串哨兵 "null"：Arco Option 的 `props.value ?? props.label ?? textContent`
+                         会在 value 为 null 时回退成展示文案（中文串），提交后后端按主键解析即报错。
+                         提交前由父组件 EnvironmentsPanel 统一归一为真正的 null。 -->
+                    <a-option value="null" :label="formText.noLinkedCertificate">{{ formText.noLinkedCertificate }}</a-option>
 
                     <template v-if="clientCertificates.length > 0">
                       <a-option

@@ -7,6 +7,8 @@ from rest_framework import serializers
 logger = logging.getLogger(__name__)
 from file_management.services import validate_file_ids, sync_file_references, serialize_file_for_runtime
 from file_management.models import FileReference
+from client_certificates.models import ClientCertificate
+from wharttest_django.serializer_fields import NullablePrimaryKeyRelatedField
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
@@ -427,6 +429,15 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
     auth_state_active = serializers.SerializerMethodField()
     client_cert_info = serializers.SerializerMethodField()
 
+    # fields='__all__' 下只覆写此字段：本模型唯一的可空外键。
+    # 允许前端用 '' / 'null' / 'undefined' 等哨兵字符串表达「不关联」；
+    # required=False 保证 PATCH 下「字段缺失 = 不修改」的语义不被破坏。
+    client_certificate = NullablePrimaryKeyRelatedField(
+        queryset=ClientCertificate.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = UiEnvironmentConfig
         fields = '__all__'
@@ -450,11 +461,17 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs):
-        """证书必须与环境中同项目。"""
+        """证书必须与环境中同项目。
+
+        归一化后语义：attrs 中存在键且值为 None = 显式置空，不做同项目校验也不回退
+        旧值；键缺失 = 未修改该字段，才回退到实例旧值。
+        """
         instance = self.instance
-        certificate = attrs.get(
-            'client_certificate', getattr(instance, 'client_certificate', None)
-        )
+        if 'client_certificate' in attrs:
+            certificate = attrs['client_certificate']  # None 表示显式置空
+        else:
+            certificate = getattr(instance, 'client_certificate', None)  # 缺失 = 不变
+
         project_id = getattr(instance, 'project_id', None) or getattr(
             attrs.get('project'), 'id', None
         )

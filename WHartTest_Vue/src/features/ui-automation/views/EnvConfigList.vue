@@ -166,7 +166,10 @@
             allow-search
             :loading="loadingCerts"
           >
-            <a-option :value="null">不关联客户端证书</a-option>
+            <!-- 注意：必须用字符串哨兵 "null"，不能用 :value="null"。
+                 Arco 的 Option 内部是 `props.value ?? props.label ?? textContent`，
+                 value 为 null 时会回退成展示文案（中文串），提交后后端按主键解析即报错。 -->
+            <a-option value="null">不关联客户端证书</a-option>
             <a-option
               v-for="cert in clientCertificates"
               :key="cert.id"
@@ -182,7 +185,7 @@
         </a-form-item>
         <a-form-item label="忽略 HTTPS 证书校验">
           <a-select v-model="formData.ignore_https_errors" placeholder="自动">
-            <a-option :value="null">自动（默认）</a-option>
+            <a-option value="null">自动（默认）</a-option>
             <a-option :value="true">忽略校验（跳过证书错误）</a-option>
             <a-option :value="false">严格校验</a-option>
           </a-select>
@@ -571,6 +574,10 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
   try {
     const data = { 
       ...formData, 
+      // 兜底归一：客户端证书只接受数字主键，其余（含 "null"/""/undefined 等哨兵）一律置空；
+      // 忽略证书校验只接受布尔，其余落回 null（自动）。
+      client_certificate: typeof formData.client_certificate === 'number' ? formData.client_certificate : null,
+      ignore_https_errors: typeof formData.ignore_https_errors === 'boolean' ? formData.ignore_https_errors : null,
       mysql_config: buildMysqlConfig()
     }
     if (isEdit.value && currentConfig.value) {

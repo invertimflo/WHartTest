@@ -1,5 +1,9 @@
 from rest_framework import serializers
 
+from api_database_configs.models import ApiDatabaseConfig
+from client_certificates.models import ClientCertificate
+from wharttest_django.serializer_fields import NullablePrimaryKeyRelatedField
+
 from .models import ApiEnvironment, ApiEnvironmentVariable, ApiGlobalRequestHeader
 
 
@@ -29,6 +33,25 @@ class ApiEnvironmentSerializer(serializers.ModelSerializer):
         source='created_by.username', read_only=True, default=''
     )
 
+    # 可空关联字段：显式声明为归一化字段，以便前端用 '' / 'null' / 'undefined'
+    # 等哨兵字符串表达「不关联」。required=False 保证「不传即不变」（PATCH 语义），
+    # allow_null=True 授权显式置空。queryset 与模型 ForeignKey 目标保持一致。
+    parent = NullablePrimaryKeyRelatedField(
+        queryset=ApiEnvironment.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    database_config = NullablePrimaryKeyRelatedField(
+        queryset=ApiDatabaseConfig.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    client_certificate = NullablePrimaryKeyRelatedField(
+        queryset=ClientCertificate.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = ApiEnvironment
         fields = [
@@ -40,24 +63,27 @@ class ApiEnvironmentSerializer(serializers.ModelSerializer):
             'client_certificate', 'client_certificate_info',
         ]
         read_only_fields = ['project', 'created_by', 'created_at', 'updated_at']
-        extra_kwargs = {
-            'parent': {'required': False},
-            'database_config': {'required': False},
-            'client_certificate': {'required': False},
-        }
 
     def validate(self, attrs):
-        """关联资源必须与环境中同项目（create 与 update 共用）。"""
+        """关联资源必须与环境中同项目（create 与 update 共用）。
+
+        归一化后的语义：attrs 中存在键且值为 None = 用户显式置空，此时不做
+        同项目校验，也不能回退到实例旧值；键缺失 = 未修改该字段，才回退实例旧值。
+        """
         instance = self.instance
         project_id = getattr(instance, 'project_id', None) or self._project_id()
 
         def _check(field, label):
-            related = attrs.get(field, getattr(instance, field, None))
+            if field in attrs:
+                related = attrs[field]  # None 表示显式置空
+            else:
+                related = getattr(instance, field, None)  # 字段缺失，沿用旧值
             if related is not None and project_id and related.project_id != project_id:
                 raise serializers.ValidationError({
                     field: [f'{label} must belong to the same project.'],
                 })
 
+        _check('parent', 'Parent environment')
         _check('database_config', 'Database config')
         _check('client_certificate', 'Client certificate')
         return attrs

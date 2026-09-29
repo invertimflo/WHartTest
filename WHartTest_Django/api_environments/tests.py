@@ -1037,3 +1037,137 @@ class ApiEnvironmentModelLayerTest(TestCase):
         self.env.parent = self.env
         with self.assertRaises(ValidationError):
             self.env.clean()
+
+
+class ApiEnvironmentNullRelatedFieldAPITest(TestCase):
+    """可空关联字段的哨兵归一：前端把「不关联」表达为 '' / 'null' / 'undefined'。
+
+    接口自动化前端用 PUT 全量提交（另有 PATCH 局部更新），两条路径都必须可用，
+    且 PATCH 下「字段缺失 = 不修改」的语义不能被破坏。
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(username='nullreluser', password='testpass')
+        _grant_api_env_permissions(self.user)
+        self.project = Project.objects.create(name='Null Rel Project', creator=self.user)
+        self.other_project = Project.objects.create(name='Null Rel Other', creator=self.user)
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        ProjectMember.objects.create(project=self.other_project, user=self.user, role='admin')
+        self.client.force_authenticate(user=self.user)
+        self.base_url = f'/api/projects/{self.project.pk}/api-environments/'
+
+        self.db_config = ApiDatabaseConfig.objects.create(
+            name='Null DB', project=self.project, db_type='mysql',
+            host='localhost', port=3306, username='root',
+            password='secret', database='db', created_by=self.user,
+        )
+
+    def _create_env(self, **extra):
+        data = {
+            'name': extra.pop('name', 'Null Env'),
+            'base_url': 'https://null.env',
+        }
+        data.update(extra)
+        response = self.client.post(self.base_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return response.data['id']
+
+    def _full_payload(self, env_id, **extra):
+        """PUT 全量提交所需的完整载荷（前端 environmentService.update 用 PUT）。"""
+        data = {
+            'name': 'Null Env',
+            'base_url': 'https://null.env',
+            'verify_ssl': False,
+            'description': '',
+            'is_active': True,
+        }
+        data.update(extra)
+        return f'{self.base_url}{env_id}/', data
+
+    def test_put_empty_string_client_certificate_clears_relation(self):
+        env_id = self._create_env(client_certificate=self._make_cert().id)
+        url, data = self._full_payload(env_id, client_certificate='')
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(ApiEnvironment.objects.get(id=env_id).client_certificate_id)
+        self.assertIsNone(response.data['client_certificate_info'])
+
+    def test_put_null_string_client_certificate_clears_relation(self):
+        env_id = self._create_env(client_certificate=self._make_cert().id)
+        url, data = self._full_payload(env_id, client_certificate='null')
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(ApiEnvironment.objects.get(id=env_id).client_certificate_id)
+
+    def test_put_undefined_string_client_certificate_clears_relation(self):
+        env_id = self._create_env(client_certificate=self._make_cert().id)
+        url, data = self._full_payload(env_id, client_certificate='undefined')
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(ApiEnvironment.objects.get(id=env_id).client_certificate_id)
+
+    def test_put_empty_string_database_config_clears_relation(self):
+        env_id = self._create_env(database_config=self.db_config.id)
+        url, data = self._full_payload(env_id, database_config='')
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(ApiEnvironment.objects.get(id=env_id).database_config_id)
+
+    def test_put_empty_string_parent_clears_relation(self):
+        parent_id = self._create_env(name='Parent Env')
+        env_id = self._create_env(name='Child Env', parent=parent_id)
+        url, data = self._full_payload(env_id, name='Child Env', parent='')
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(ApiEnvironment.objects.get(id=env_id).parent_id)
+
+    def test_put_cross_project_certificate_still_400(self):
+        foreign = self._make_cert(project=self.other_project, name='foreign-cert')
+        env_id = self._create_env()
+        url, data = self._full_payload(env_id, client_certificate=foreign.id)
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client_certificate', response.data)
+
+    def test_put_nonexistent_certificate_still_400(self):
+        env_id = self._create_env()
+        url, data = self._full_payload(env_id, client_certificate=999999)
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client_certificate', response.data)
+
+    def test_patch_without_certificate_field_keeps_relation(self):
+        """字段缺失 = 不修改（关键回归）。"""
+        cert = self._make_cert()
+        env_id = self._create_env(client_certificate=cert.id)
+        response = self.client.patch(
+            f'{self.base_url}{env_id}/', {'description': 'touch'}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(
+            ApiEnvironment.objects.get(id=env_id).client_certificate_id, cert.id
+        )
+
+    def test_put_valid_ids_still_resolve(self):
+        """合法整数 id 仍正常工作，未因显式 queryset 声明而误判。"""
+        cert = self._make_cert()
+        env_id = self._create_env()
+        url, data = self._full_payload(
+            env_id, client_certificate=cert.id, database_config=self.db_config.id
+        )
+        response = self.client.put(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        env = ApiEnvironment.objects.get(id=env_id)
+        self.assertEqual(env.client_certificate_id, cert.id)
+        self.assertEqual(env.database_config_id, self.db_config.id)
+
+    def _make_cert(self, project=None, name='nullrel-cert'):
+        from client_certificates.models import ClientCertificate
+        return ClientCertificate.objects.create(
+            name=name,
+            project=project or self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=None,
+            created_by=self.user,
+        )

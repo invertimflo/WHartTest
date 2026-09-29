@@ -928,3 +928,140 @@ class UiEnvironmentConfigCertificateApiTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('client_certificate', response.data)
+
+
+class UiEnvironmentConfigNullCertificateApiTests(TestCase):
+    """「不关联客户端证书」应可正常保存。
+
+    前端把「不关联」表达为 '' / 'null' / 'undefined' 等字符串，而 client_certificate
+    是外键（期望主键 int），历史上会报「类型错误。期望为主键，获得的类型为 str」。
+    同时必须保证 PATCH 下「字段缺失 = 不修改」的语义不被破坏。
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(username='env-null-admin', password='secret')
+        self.project = Project.objects.create(name='Env Null Project')
+        ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            file=ContentFile(b'bytes', name='n.p12'),
+            original_name='n.p12',
+            extension='.p12',
+            size=5,
+        )
+        self.certificate = ClientCertificate.objects.create(
+            name='cert-null',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        self.url = '/api/ui-automation/env-configs/'
+
+    def _create_env(self, **extra):
+        payload = {
+            'project': self.project.id,
+            'name': 'env-null',
+            'base_url': 'https://env-null.local',
+        }
+        payload.update(extra)
+        response = self.client.post(self.url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return response.data['id']
+
+    def _assert_cleared(self, env_id):
+        from ui_automation.models import UiEnvironmentConfig
+        env = UiEnvironmentConfig.objects.get(id=env_id)
+        self.assertIsNone(env.client_certificate_id)
+
+    def test_create_with_null_sentinel_string_ok(self):
+        """POST 带 '' / 'null' / 'undefined' 均 201 且置空。"""
+        for sentinel in ('', 'null', 'undefined'):
+            with self.subTest(sentinel=sentinel):
+                env_id = self._create_env(
+                    name=f'env-{sentinel or "empty"}',
+                    client_certificate=sentinel,
+                )
+                self._assert_cleared(env_id)
+
+    def test_patch_empty_string_clears_relation(self):
+        env_id = self._create_env(client_certificate=self.certificate.id)
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': ''}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['client_cert_info'])
+        self._assert_cleared(env_id)
+
+    def test_patch_null_string_clears_relation(self):
+        env_id = self._create_env(client_certificate=self.certificate.id)
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': 'null'}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['client_cert_info'])
+        self._assert_cleared(env_id)
+
+    def test_patch_undefined_string_clears_relation(self):
+        env_id = self._create_env(client_certificate=self.certificate.id)
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': 'undefined'}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertIsNone(response.data['client_cert_info'])
+        self._assert_cleared(env_id)
+
+    def test_patch_without_certificate_field_keeps_relation(self):
+        """字段缺失 = 不修改（关键回归：不得把「缺失」当成「置空」）。"""
+        env_id = self._create_env(client_certificate=self.certificate.id)
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'is_default': True}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        cert_info = response.data['client_cert_info']
+        self.assertIsNotNone(cert_info)
+        self.assertEqual(cert_info['id'], self.certificate.id)
+
+    def test_patch_nonexistent_certificate_still_400(self):
+        env_id = self._create_env()
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': 999999}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client_certificate', response.data)
+
+    def test_patch_cross_project_certificate_still_400(self):
+        other_project = Project.objects.create(name='Env Null Other')
+        foreign_cert = ClientCertificate.objects.create(
+            name='foreign-null',
+            project=other_project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=None,
+            created_by=self.user,
+        )
+        env_id = self._create_env()
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': foreign_cert.id}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('client_certificate', response.data)
+
+    def test_patch_valid_certificate_sets_relation(self):
+        env_id = self._create_env()
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': self.certificate.id}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data['client_cert_info']['id'], self.certificate.id)
+
+    def test_direct_json_null_still_works(self):
+        """回归：显式 JSON null 后端的既有行为不变。"""
+        env_id = self._create_env(client_certificate=self.certificate.id)
+        response = self.client.patch(
+            f'{self.url}{env_id}/', {'client_certificate': None}, format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self._assert_cleared(env_id)
