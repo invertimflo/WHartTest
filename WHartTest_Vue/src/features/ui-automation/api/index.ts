@@ -368,6 +368,11 @@ export interface RecorderSessionInfo {
   page_step_id: number
   pre_executed?: number
   pre_failed?: boolean
+  /**
+   * 客户端证书 / HTTPS 相关告警（后端只读返回）：
+   * 例如证书口令错误导致证书未生效、base_url 非 https 等。
+   */
+  warnings?: string[]
 }
 
 export interface RecorderFinishResult {

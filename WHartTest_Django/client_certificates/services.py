@@ -8,8 +8,11 @@
 - 因此凡是"带口令的 PEM"与"PKCS#12"，都必须在这里转换成**未加密的合并 PEM**再落盘，
   把路径交给 requests。转换产物按证书指纹缓存，避免每次执行都解密。
 
-UI 侧不需要本模块：Playwright 的 ``client_certificates`` 原生支持
-``pfxPath`` + ``passphrase`` 与 ``certPath``/``keyPath``（见执行器 client_cert.py）。
+UI 侧（执行器）不需要本模块的 requests 转换：Playwright 的 ``client_certificates``
+原生支持 ``pfxPath`` + ``passphrase`` 与 ``certPath``/``keyPath``（见执行器
+client_cert.py）。但**本地录制器**（ui_automation/recorder/recorder_server.js）
+与 Django 同机运行，需要「本地文件路径 + 已解析的 ignore 布尔」这一形态，
+故本模块另提供 ``build_recorder_https_payload`` 一族函数。
 
 失败一律降级为「本次不启用该证书」并记录告警，不抛异常 —— 与执行器侧
 "只告警不阻断"的风格保持一致，避免一个可选特性把整个用例执行搞挂。
@@ -21,7 +24,8 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Iterable, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 from django.conf import settings
 
@@ -31,6 +35,9 @@ logger = logging.getLogger(__name__)
 RequestsCert = Union[str, Tuple[str, str]]
 
 CACHE_DIR_NAME = '.client_cert_cache'
+
+# Playwright 的 origin 必须精确匹配 https://host[:port]，443 显式端口与省略等价
+DEFAULT_HTTPS_PORT = 443
 
 
 # ----------------------------------------------------------------------
@@ -250,6 +257,311 @@ def build_env_client_cert_payload(env) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001 - 证书组装失败不应阻断任务下发
         logger.warning('构造环境 %s 的客户端证书载荷失败：%s', getattr(env, 'id', None), exc)
         return None
+
+
+# ----------------------------------------------------------------------
+# HTTPS origin 归一化
+#
+# Playwright 的 clientCertificates 要求 origin **精确匹配** https://host[:port]，
+# 不支持通配、不接受 path/query。语义必须与执行器侧
+# WHartTest_Actuator/client_cert.py 的 normalize_origin 完全一致 —— 两侧对同一
+# 个 base_url 必须推导出同一个 origin，否则会出现「执行器能用、录制器不能用」
+# 这类难查的偏差。本模块是平台侧（env_config 权威数据所在）的权威实现，
+# 录制器 Node 侧只消费结果、不做二次推导。
+# ----------------------------------------------------------------------
+
+def normalize_origin(url: Optional[str]) -> Optional[str]:
+    """把任意 URL 归一化成 Playwright 需要的 https origin（``https://host[:port]``）。
+
+    仅接受 https；丢弃 path / query / fragment / userinfo；非 443 端口保留，
+    显式 443 去掉（``https://a.com:443`` 与 ``https://a.com`` 等价）；IPv6 主机
+    重新加方括号。无法解析或非 https 时返回 ``None``。
+    """
+    if not url or not isinstance(url, str):
+        return None
+
+    raw = url.strip()
+    if not raw:
+        return None
+
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return None
+
+    if parts.scheme.lower() != 'https':
+        return None
+
+    hostname = parts.hostname
+    if not hostname:
+        return None
+
+    # urlsplit.hostname 会剥掉 IPv6 的方括号，这里补回来
+    host = f'[{hostname}]' if ':' in hostname else hostname
+
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+
+    if port is None or port == DEFAULT_HTTPS_PORT:
+        return f'https://{host}'
+
+    return f'https://{host}:{port}'
+
+
+def parse_origins(*values: Optional[str]) -> list:
+    """把若干「origin 或逗号分隔的 origin 串」合并为去重、保序的 origin 列表。
+
+    非 https 项与无法解析项被静默丢弃（调用方通过返回值是否为空判断）。
+    """
+    result: list = []
+    seen: set = set()
+
+    for value in values:
+        if not value or not isinstance(value, str):
+            continue
+        for chunk in value.split(','):
+            origin = normalize_origin(chunk)
+            if origin and origin not in seen:
+                seen.add(origin)
+                result.append(origin)
+
+    return result
+
+
+# ----------------------------------------------------------------------
+# 本地录制器（Node recorder_server.js）侧材料准备
+#
+# 与执行器路径的本质差异：录制器由 Django 用 subprocess 拉起，**与 Django 同机同
+# 容器**，因此不需要「托管文件描述 + 远程下载」，直接给本地绝对路径即可。
+# ----------------------------------------------------------------------
+
+def _asset_cache_suffix(asset) -> str:
+    """缓存文件名后缀：沿用原文件扩展名便于排查，拿不到就退化为 .bin。"""
+    file_field = getattr(asset, 'file', None)
+    raw = getattr(file_field, 'name', '') if file_field is not None else ''
+    if not raw:
+        raw = getattr(asset, 'filename', '') or ''
+    suffix = Path(str(raw)).suffix.lower()
+    return suffix if 0 < len(suffix) <= 10 else '.bin'
+
+
+def _materialize_asset_to_cache(asset, cache_key: str, suffix: str) -> str:
+    """取证书文件的**本地可读路径**；文件不在本地磁盘时落到缓存目录兜底。
+
+    ``asset_filesystem_path`` 依赖 ``FieldFile.path``，对 S3 等非本地存储后端会
+    抛 NotImplementedError —— 而录制器 Node 进程只能读本地文件。此时改为读出字节
+    写入 ``MEDIA_ROOT/.client_cert_cache``（0600），保证一定能拿到可读路径。
+    失败返回空串（调用方降级为「本次不启用证书」）。
+    """
+    path = asset_filesystem_path(asset)
+    if path and os.path.exists(path):
+        return path
+
+    file_field = getattr(asset, 'file', None)
+    if file_field is None:
+        return ''
+
+    try:
+        target = get_cache_dir() / f'{cache_key}{suffix}'
+        if target.exists() and target.stat().st_size > 0:
+            return str(target)
+        with file_field.storage.open(file_field.name, 'rb') as fh:
+            data = fh.read()
+        if not data:
+            return ''
+        return _write_private_file(data, target)
+    except Exception as exc:  # noqa: BLE001 - 存储后端异常统一降级
+        logger.warning('客户端证书文件无法落到本地缓存：%s', exc)
+        return ''
+
+
+def build_recorder_client_certificates(certificate, *, origins=None) -> Tuple[list, list]:
+    """构造**本地录制器**用的 Playwright ``clientCertificates`` 条目 + 中文告警。
+
+    返回 ``(entries, warnings)``：
+
+    - ``entries``：camelCase 键的 dict 列表（Playwright **JS** 侧只认
+      ``origin`` / ``pfxPath`` / ``certPath`` / ``keyPath`` / ``passphrase``，
+      写成 snake_case 会被**静默忽略** —— 证书不生效且不报错）。
+    - ``warnings``：中文原因列表，供接口响应/前端提示。
+
+    材料形态（Playwright 只接受这两种）：
+      - PKCS#12：``pfxPath`` + ``passphrase``（口令为空时不带该键）
+      - PEM：``certPath`` + ``keyPath``
+
+    PEM 带口令时，Playwright 对「加密私钥 + passphrase」的支持随实现而异，这里
+    统一先用 ``cryptography`` 解出**未加密私钥**落缓存再交给 Playwright，规避
+    不确定性。PKCS#12 也先本地预校验一次，把「口令错/格式不支持」在启动阶段就
+    变成明确告警，而不是等 Chromium 握手失败后只看到白屏。
+
+    **绝不抛异常**：证书只是可选特性，任何失败都降级为「本次不启用 + 告警」。
+    日志只记录 origin 与文件路径，**绝不记录口令**。
+    """
+    if certificate is None:
+        return [], []
+
+    name = getattr(certificate, 'name', '') or ''
+    origin_list = parse_origins(*(origins or []))
+    if not origin_list:
+        return [], [
+            f'客户端证书「{name}」未生效：未能从环境基础 URL 推导出 https origin'
+            '（Playwright 要求 origin 精确匹配且不支持通配，非 https 站点无法启用客户端证书）。'
+        ]
+
+    fingerprint = _fingerprint(certificate)
+    cert_path = _materialize_asset_to_cache(
+        certificate.cert_file, f'{fingerprint}-cert', _asset_cache_suffix(certificate.cert_file),
+    )
+    key_path = _materialize_asset_to_cache(
+        certificate.key_file, f'{fingerprint}-key', _asset_cache_suffix(certificate.key_file),
+    )
+
+    passphrase = ''
+    try:
+        passphrase = certificate.get_passphrase() or ''
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('客户端证书「%s」口令解密失败：%s', name, exc)
+
+    if not cert_path:
+        return [], [f'客户端证书「{name}」的证书文件缺失或不可读，本次不启用该证书。']
+
+    common: dict = {}
+    if certificate.cert_type == certificate.CERT_TYPE_PKCS12:
+        try:
+            # 预校验：口令错误 / 不是合法的 PKCS#12 都在这里暴露
+            _load_pkcs12(cert_path, passphrase)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('客户端证书「%s」PKCS#12 预校验失败：%s', name, exc)
+            return [], [
+                f'客户端证书「{name}」不可用：PKCS#12 解析失败（口令是否正确？或格式不受支持）：{exc}'
+            ]
+        common['pfxPath'] = cert_path
+        # 纯空白视为「未设置」：带上会让 Chromium 解密失败；含非空白字符的口令原样传递
+        if passphrase and passphrase.strip():
+            common['passphrase'] = passphrase
+    else:
+        if not key_path:
+            return [], [f'客户端证书「{name}」的私钥文件缺失或不可读，本次不启用该证书。']
+        if passphrase:
+            try:
+                key_pem = _load_encrypted_pem_key(key_path, passphrase)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning('客户端证书「%s」私钥解密失败：%s', name, exc)
+                return [], [
+                    f'客户端证书「{name}」不可用：私钥解密失败（口令是否正确？或私钥格式不受支持）：{exc}'
+                ]
+            try:
+                key_path = _write_private_file(
+                    key_pem, get_cache_dir() / f'{fingerprint}.key.pem',
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning('客户端证书「%s」解密私钥落盘失败：%s', name, exc)
+                return [], [f'客户端证书「{name}」不可用：解密后的私钥无法落盘（{exc}）。']
+        common['certPath'] = cert_path
+        common['keyPath'] = key_path
+
+    logger.info(
+        '录制器已启用客户端证书「%s」（类型=%s），生效 origin：%s，证书文件：%s',
+        name, certificate.cert_type, ', '.join(origin_list), cert_path,
+    )
+    return [{'origin': origin, **common} for origin in origin_list], []
+
+
+def resolve_recorder_ignore_https_errors(env, cert_entries) -> bool:
+    """录制器的「忽略 HTTPS 证书校验」三态解析 —— 语义严格对齐执行器。
+
+    环境配置留空（``None``）= auto：**仅当客户端证书确实生效时**才忽略服务端证书
+    错误。理由是自签名服务端证书恰恰是客户端证书最常见的搭配场景，此时不忽略必然
+    握手失败；而裸 HTTP/公网可信证书场景维持原有的严格校验行为不变。
+    ``True`` / ``False`` = 用户显式选择，强制覆盖。
+    """
+    configured = getattr(env, 'ignore_https_errors', None)
+    if configured is None:
+        return bool(cert_entries)
+    return bool(configured)
+
+
+def build_recorder_https_payload(env, *, extra_urls: Iterable[str] = ()) -> dict:
+    """收敛入口：为本地录制器构造 https 相关启动参数。
+
+    返回::
+
+        {
+          'client_certificates': [ {...camelCase...} ],   # 材料不可用时为空列表
+          'ignore_https_errors': bool,                    # 已按三态解析完成
+          'warnings': [ '中文原因', ... ],
+        }
+
+    ``extra_urls`` 用于补充 origin 候选（录制=base_url；无执行器执行=各分组导航
+    地址），覆盖「环境未配 base_url、按页面 URL 导航」的场景。
+    """
+    payload = {'client_certificates': [], 'ignore_https_errors': False, 'warnings': []}
+    if env is None:
+        return payload
+
+    cert_bound = bool(getattr(env, 'client_certificate_id', None))
+    certificate = getattr(env, 'client_certificate', None) if cert_bound else None
+
+    if certificate is None:
+        # 未绑定证书时仍要解析三态：用户可能显式要求「忽略 HTTPS 校验」
+        payload['ignore_https_errors'] = resolve_recorder_ignore_https_errors(env, [])
+        if cert_bound:
+            payload['warnings'] = ['环境绑定的客户端证书已被删除，本次不启用客户端证书。']
+        return payload
+
+    origins = parse_origins(getattr(env, 'base_url', None), *(extra_urls or ()))
+    try:
+        entries, warnings = build_recorder_client_certificates(certificate, origins=origins)
+    except Exception as exc:  # noqa: BLE001
+        # 双保险：证书只是可选特性，任何意外都不允许阻断录制/执行的启动
+        logger.warning('构造录制器客户端证书失败：%s', exc)
+        name = getattr(certificate, 'name', '') or ''
+        entries, warnings = [], [f'客户端证书「{name}」组装失败，本次不启用：{exc}']
+    payload['client_certificates'] = entries
+    payload['ignore_https_errors'] = resolve_recorder_ignore_https_errors(env, entries)
+    payload['warnings'] = list(warnings)
+    return payload
+
+
+def env_config_certificate_warnings(env) -> list:
+    """环境配置层面的证书预检告警（供 API 只读字段展示，不写副作用、不抛异常）。
+
+    只回答一个问题：**这张证书在这个环境里有没有可能生效**。为此刻意只做廉价
+    检查（origin 可推导性、证书是否启用、文件是否存在），不做 cryptography 加载
+    —— 后者已由证书自身的 ``validate`` 动作覆盖，而本函数会在环境列表接口里对
+    每一行执行。
+    """
+    if env is None or not getattr(env, 'client_certificate_id', None):
+        return []
+
+    certificate = getattr(env, 'client_certificate', None)
+    if certificate is None:
+        return ['环境绑定的客户端证书已被删除，执行与录制时都不会启用。']
+
+    warnings: list = []
+    base_url = (getattr(env, 'base_url', '') or '').strip()
+    if not base_url:
+        warnings.append(
+            '未填写基础 URL，无法确定客户端证书的生效 origin（录制/执行将回退到页面 URL）。'
+        )
+    elif not normalize_origin(base_url):
+        warnings.append(
+            f'基础 URL「{base_url}」不是可用的 https 地址，客户端证书不会生效'
+            '（Playwright 仅对 https origin 启用客户端证书）。'
+        )
+
+    if not getattr(certificate, 'is_active', True):
+        warnings.append(f'客户端证书「{certificate.name}」已禁用，执行与录制时都不会启用。')
+
+    cert_path = asset_filesystem_path(certificate.cert_file)
+    if certificate.cert_file_id and not cert_path:
+        warnings.append(f'客户端证书「{certificate.name}」的证书文件在存储后端不可读。')
+    elif cert_path and not os.path.exists(cert_path):
+        warnings.append(f'客户端证书「{certificate.name}」的证书文件不存在：{cert_path}')
+
+    return warnings
 
 
 def validate_certificate(certificate) -> list:

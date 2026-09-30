@@ -385,6 +385,11 @@ export interface UiEnvironmentConfig extends TimeStampFields {
   /** HTTPS 客户端证书（mTLS）引用，可为空 */
   client_certificate?: number | null
   client_cert_info?: UiClientCertBrief | null
+  /**
+   * 客户端证书预检告警（只读）：base_url 非 https、origin 推导不出、
+   * 证书被禁用/文件缺失等 —— 提前告知「这张证书在此环境不可能生效」。
+   */
+  client_cert_warnings?: string[]
   /** 忽略证书校验三态：null=自动（默认） / true=忽略 / false=严格校验 */
   ignore_https_errors?: boolean | null
   is_default: boolean

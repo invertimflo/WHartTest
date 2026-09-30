@@ -182,6 +182,13 @@
               <span v-else-if="cert.has_passphrase" class="cert-option-note">（有口令）</span>
             </a-option>
           </a-select>
+          <template #extra>
+            <!-- 证书预检告警（只读字段）：提前告知「这张证书在这个环境不可能生效」，
+                 避免用户到录制/执行时只看到空白画布 -->
+            <div v-if="clientCertWarnings.length" class="cert-warning">
+              <div v-for="(warn, idx) in clientCertWarnings" :key="idx">{{ warn }}</div>
+            </div>
+          </template>
         </a-form-item>
         <a-form-item label="忽略 HTTPS 证书校验">
           <a-select v-model="formData.ignore_https_errors" placeholder="自动">
@@ -190,7 +197,7 @@
             <a-option :value="false">严格校验</a-option>
           </a-select>
           <template #extra>
-            <span class="cert-option-note">「自动」下仅当未配置客户端证书时按执行器节点默认策略处理。</span>
+            <span class="cert-option-note">「自动」：绑定了客户端证书时自动忽略服务端证书错误（自签名站点常见），未绑定证书时保持严格校验；显式选择则强制覆盖。</span>
           </template>
         </a-form-item>
         <a-divider>数据库配置</a-divider>
@@ -299,6 +306,8 @@ const formData = reactive<UiEnvironmentConfigForm>({
 // 项目级客户端证书（HTTPS / mTLS），供环境引用
 const clientCertificates = ref<UiClientCertificate[]>([])
 const loadingCerts = ref(false)
+// 当前编辑对象携带的证书预检告警（后端只读字段，不参与提交）
+const clientCertWarnings = ref<string[]>([])
 
 const fetchClientCertificates = async () => {
   if (!projectId.value) {
@@ -513,6 +522,7 @@ const resetForm = () => {
     is_default: false,
   })
   Object.assign(mysqlConfig, { host: '', port: 3306, user: '', password: '', database: '' })
+  clientCertWarnings.value = []
   formRef.value?.clearValidate()
 }
 
@@ -546,6 +556,7 @@ const editConfig = (record: UiEnvironmentConfig) => {
     password: cfg.password || '',
     database: cfg.database || '',
   })
+  clientCertWarnings.value = record.client_cert_warnings || []
   modalVisible.value = true
 }
 
@@ -713,5 +724,11 @@ watch(projectId, () => {
 .cert-option-note {
   font-size: 12px;
   color: var(--color-text-3);
+}
+
+.cert-warning {
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgb(var(--orange-6));
 }
 </style>

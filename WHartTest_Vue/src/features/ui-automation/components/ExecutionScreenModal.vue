@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { Message } from '@arco-design/web-vue'
 import { useAppI18n } from '@/composables/useAppI18n'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 
@@ -159,6 +160,21 @@ function onResult(data: any) {
   }
 }
 
+/**
+ * 录制器浏览器执行的运行期状态（导航失败、客户端证书未生效等）：
+ * 走与录制画布相同的 u_recorder_status 通道，执行期间也必须可见 ——
+ * 否则失败原因只会体现在最终结果里，无法在执行过程中提示。
+ */
+function onRecorderStatus(data: any) {
+  if (!props.visible) return
+  const args = data?.data?.func_args || {}
+  if (args.status === 'error') {
+    Message.error(args.message || args.status)
+  } else if (args.status === 'warning') {
+    Message.warning(args.message || args.status)
+  }
+}
+
 watch(
   () => [props.visible, props.taskId],
   ([visible]) => {
@@ -190,6 +206,7 @@ let offFrame: (() => void) | null = null
 let offRecorderFrame: (() => void) | null = null
 let offCase: (() => void) | null = null
 let offStep: (() => void) | null = null
+let offStatus: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
@@ -197,6 +214,7 @@ onMounted(() => {
   offRecorderFrame = uiWebSocket.on(UiSocketEnum.RECORDER_FRAME, onRecorderFrame as any)
   offCase = uiWebSocket.on(UiSocketEnum.CASE_RESULT, onResult as any)
   offStep = uiWebSocket.on(UiSocketEnum.PAGE_STEP_RESULT, onResult as any)
+  offStatus = uiWebSocket.on(UiSocketEnum.RECORDER_STATUS, onRecorderStatus as any)
   resizeObserver = new ResizeObserver(() => fitCanvas())
   if (canvasWrapRef.value) resizeObserver.observe(canvasWrapRef.value)
   nextTick(fitCanvas)
@@ -207,6 +225,7 @@ onUnmounted(() => {
   offRecorderFrame?.()
   offCase?.()
   offStep?.()
+  offStatus?.()
   resizeObserver?.disconnect()
   resizeObserver = null
   if (noFrameTimer) {

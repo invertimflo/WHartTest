@@ -662,6 +662,20 @@ LOGGING = {
             "level": "WARNING",
             "propagate": False,
         },
+        # UI 自动化（含本地录制器）：录制/执行链路此前因未注册 logger 而日志被丢弃，
+        # 白屏、证书未生效等故障在生产上无迹可查。录制器子进程的 stderr（serverLog）
+        # 由 recorder/session_manager.py 以 WARNING 转发到这里。
+        "ui_automation": {
+            "handlers": ["console", "app_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        # 客户端证书材料准备（口令解密失败、格式不支持、origin 推导失败等）
+        "client_certificates": {
+            "handlers": ["console", "app_file", "error_file"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }
 

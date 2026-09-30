@@ -825,15 +825,17 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             ))
 
     async def _recorder_exec_frame_relay(self, session, user: str):
-        """执行期间把浏览器画面帧直推发起用户（与录制画布同一事件）。"""
+        """执行期间把浏览器画面帧与状态/告警事件直推发起用户。
+
+        画面帧走 u_recorder_frame（与录制画布同一事件）；录制器的运行期错误
+        （初始导航失败、证书未生效等）走 u_recorder_status，前端据此提示。
+        """
         while True:
             await asyncio.sleep(0.02)
             try:
                 frame = session.take_latest_frame()
-                if not frame:
-                    continue
                 web_user = SocketUserManager.get_web_user(user)
-                if web_user:
+                if frame and web_user:
                     await web_user.send_json(SocketDataModel(
                         code=ResponseCode.SUCCESS,
                         msg='recorder_frame',
@@ -842,6 +844,21 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                         data=QueueModel(
                             func_name=UiSocketEnum.RECORDER_FRAME,
                             func_args={'frame': frame},
+                        ),
+                    ))
+                # 状态事件必须一并 drain：原实现只看帧，录制器上报的 status 会一直
+                # 积压在事件队列里（drain_events 从未被调用），故障信息静默丢失。
+                for ev in session.drain_events():
+                    if not web_user or ev.get('type') != 'status':
+                        continue
+                    await web_user.send_json(SocketDataModel(
+                        code=ResponseCode.SUCCESS,
+                        msg='recorder_status',
+                        user=user,
+                        is_notice=NoticeType.WEB,
+                        data=QueueModel(
+                            func_name=UiSocketEnum.RECORDER_STATUS,
+                            func_args=ev.get('data') or {},
                         ),
                     ))
             except Exception as exc:
@@ -939,6 +956,23 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         group_bases = await sync_to_async(_load_group_urls)(groups)
         start_url = group_bases[0] if group_bases else ''
 
+        # HTTPS 客户端证书 / 忽略服务端证书错误：与 REST 录制路径同源同语义
+        # （唯一差异是 origin 候选要覆盖各分组的导航地址——环境未配 base_url 时
+        # 步骤是按页面 URL 导航的）。录制器与 Django 同机，直接下发本地路径。
+        from client_certificates.services import build_recorder_https_payload
+
+        https_payload = {'client_certificates': [], 'ignore_https_errors': False, 'warnings': []}
+        if env_config is not None:
+            https_payload = await sync_to_async(build_recorder_https_payload)(
+                env_config, extra_urls=group_bases,
+            )
+            for warning in https_payload.get('warnings') or []:
+                logger.warning('[recorder-exec] HTTPS 配置告警: %s', warning)
+            # 绑了证书却没能生效：必须显式告知，否则失败现场只剩「页面打不开」
+            if getattr(env_config, 'client_certificate_id', None) and not https_payload.get('client_certificates'):
+                detail = '；'.join(https_payload.get('warnings') or []) or '证书材料不可用'
+                await self._send_recorder_error(f'客户端证书未生效（{detail}），将以无证书方式执行')
+
         session = None
         frame_task = None
         started = _time.time()
@@ -966,6 +1000,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             }
             if storage_state:
                 start_params['storage_state'] = storage_state
+            if https_payload.get('client_certificates'):
+                start_params['client_certificates'] = https_payload['client_certificates']
+            if https_payload.get('ignore_https_errors'):
+                start_params['ignore_https_errors'] = True
             # 同步 request 移出事件循环（to_thread），执行期间帧转发/中断仍可响应
             await asyncio.to_thread(session.request, 'start', start_params, 90)
             logger.info('[recorder-exec] start 请求完成，开始逐组执行')

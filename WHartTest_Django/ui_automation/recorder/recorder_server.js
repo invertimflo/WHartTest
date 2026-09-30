@@ -7,11 +7,19 @@
  * 协议：stdin/stdout 行分隔 JSON
  * 请求：   { id, method, params }
  * 响应：   { id, ok, error?, state? }
- * 事件推送：{ "event": "frame"|"actions", data: {...} }   （无 id，主动推送）
+ * 事件推送：{ "event": "frame"|"actions"|"status", data: {...} }   （无 id，主动推送）
  *
  * 方法：
  *   - ping
- *   - start { url, viewport: {width, height} }  启动无头浏览器并注入录制捕获脚本
+ *   - start { url, viewport: {width, height}, storage_state?,
+ *             client_certificates?: [{origin, pfxPath?, passphrase?}
+ *                                 | {origin, certPath?, keyPath?}],
+ *             ignore_https_errors?: bool }
+ *         启动无头浏览器并注入录制捕获脚本。客户端证书条目必须是 Playwright 的
+ *         camelCase 形状（origin 为 https://host[:port] 精确匹配），由 Django 侧
+ *         归一化后下发；本进程只校验形状与文件可读，并在 switch_context /
+ *         reset_context 重建上下文时粘性复用。ignore_https_errors 也已由平台按
+ *         环境配置三态解析为布尔值。
  *   - input { type: 'mouse'|'wheel'|'key', ... } 回放前端转发来的浏览器输入
  *   - assert { mode: 'visible'|'contain_text'|'enabled'|'url' } 对"悬停元素"记录断言动作
  *   - save_login_state  保存当前浏览器上下文登录态（storageState：cookies + localStorage）
@@ -1007,6 +1015,11 @@ const state = {
   tracePath: null,         // 执行 trace.zip 落盘路径（start_trace 设置，stop_trace 消费）
   pageErrors: [],          // 页面 JS 错误（pageerror 事件，执行日志展示用）
   finished: false,
+  // HTTPS 客户端证书 / 忽略服务端证书错误：由 start 参数一次性设定后**粘性保留**。
+  // 必须放在 state 上而不是每次 newContext 现传，因为 switch_context / reset_context
+  // 会重建上下文，重建时必须沿用同一套证书配置，否则多步骤用例切登录态后证书丢失。
+  clientCertificates: [],
+  ignoreHTTPSErrors: false,
 };
 
 // 连续输入合并窗口：同一元素在该窗口内多次 input 事件合并为一次 fill
@@ -1335,13 +1348,114 @@ async function ensureInjection() {
   }
 }
 
-/** 构建浏览器上下文参数：视口 + 可选登录态快照（storageState） */
+/** 上报一条状态事件：经 u_recorder_status 通道直达前端录制/执行画布提示。 */
+function reportStatus(status, message, extra) {
+  try {
+    pushEvent('status', Object.assign({ status, message }, extra || {}));
+  } catch (_) {}
+}
+
+/**
+ * 校验并收敛平台下发的 clientCertificates（camelCase）。
+ *
+ * 平台已在 Django 侧完成 origin 归一化（https://host[:port]，Playwright 要求精确
+ * 匹配、不支持通配），这里只做「参数形状 + 文件确实可读」的兜底校验。之所以必须
+ * 主动校验：Playwright 对非法/不完整的证书条目是**静默忽略**的，表现为「配了证书
+ * 却依然白屏」，排查成本极高 —— 启动阶段就把原因显式打出来。
+ *
+ * 键名必须保持 camelCase（pfxPath/certPath/keyPath/passphrase），snake_case 会被
+ * Playwright 静默忽略。日志只输出 origin 与文件路径，**绝不输出 passphrase**。
+ */
+function normalizeClientCertificates(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const out = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const origin = String(item.origin || '').trim();
+    if (!/^https:\/\//i.test(origin)) {
+      serverLog('忽略客户端证书条目：origin 不是 https 地址 ->', origin || '(空)');
+      continue;
+    }
+    const entry = { origin };
+    if (item.pfxPath) {
+      if (!fs.existsSync(item.pfxPath)) {
+        serverLog('忽略客户端证书条目：pfx 文件不存在 ->', item.pfxPath);
+        continue;
+      }
+      entry.pfxPath = item.pfxPath;
+    } else if (item.certPath && item.keyPath) {
+      if (!fs.existsSync(item.certPath) || !fs.existsSync(item.keyPath)) {
+        serverLog('忽略客户端证书条目：cert/key 文件不存在 ->', item.certPath, item.keyPath);
+        continue;
+      }
+      entry.certPath = item.certPath;
+      entry.keyPath = item.keyPath;
+    } else {
+      serverLog('忽略客户端证书条目：缺少 pfxPath 或 certPath+keyPath ->', origin);
+      continue;
+    }
+    if (item.passphrase) entry.passphrase = String(item.passphrase);
+    out.push(entry);
+  }
+  return out;
+}
+
+/** 构建浏览器上下文参数：视口 + 可选登录态快照 + 粘性 HTTPS 证书配置。
+ *
+ * clientCertificates / ignoreHTTPSErrors 只能传给 newContext（不能传给 launch），
+ * 且必须覆盖全部 newContext 调用点（启动 / 切换登录态 / 无痕重建）——因此统一从
+ * state 读取，调用方无需各自传参。
+ */
 function buildContextOptions(viewport, storageState) {
   const opts = { viewport };
   if (storageState) {
     opts.storageState = storageState;
   }
+  if (Array.isArray(state.clientCertificates) && state.clientCertificates.length > 0) {
+    opts.clientCertificates = state.clientCertificates;
+  }
+  if (state.ignoreHTTPSErrors) {
+    // 注意 JS 侧键名是 ignoreHTTPSErrors（HTTPS 全大写），与 Python 的
+    // ignore_https_errors 不同，写错会被静默忽略。
+    opts.ignoreHTTPSErrors = true;
+  }
   return opts;
+}
+
+/** clientCertificates 需要 Playwright >= 1.46，旧版会静默忽略该参数。 */
+function warnIfPlaywrightTooOld(skillDir, certCount) {
+  if (!certCount) return;
+  try {
+    // 直接读 node_modules 里的 package.json：走 require('playwright/package.json')
+    // 可能被包的 exports 字段拦截（ERR_PACKAGE_PATH_NOT_EXPORTED），版本判断会失效
+    const pkgPath = path.join(skillDir, 'node_modules', 'playwright', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const parts = String(pkg.version || '').split('.');
+    const major = parseInt(parts[0] || '0', 10) || 0;
+    const minor = parseInt(parts[1] || '0', 10) || 0;
+    if (major < 1 || (major === 1 && minor < 46)) {
+      reportStatus(
+        'warning',
+        `当前 Playwright 版本 ${pkg.version} 不支持客户端证书（需 >= 1.46），本次录制不会携带证书`,
+      );
+    }
+  } catch (_) {}
+}
+
+/** 导航失败时按错误码补一句可操作的中文提示（HTTPS/证书是白屏最常见原因）。 */
+function navigationHint(message) {
+  const text = String(message || '');
+  if (/ERR_BAD_SSL_CLIENT_AUTH_CERT|ERR_SSL_CLIENT_AUTH/i.test(text)) {
+    return '。目标站点要求客户端证书，但浏览器未被接受：请检查环境配置绑定的客户端证书是否与本站点匹配'
+      + '（origin 必须是 https://host[:port] 精确匹配，且证书未过期、口令正确）。';
+  }
+  if (/ERR_CERT_|ERR_SSL_|ERR_BAD_SSL/i.test(text)) {
+    return '。服务端证书校验失败：若为自签名证书，请在环境配置中把「忽略 HTTPS 证书校验」设为「忽略校验」。';
+  }
+  if (/ERR_CONNECTION|ERR_NAME_NOT_RESOLVED|ERR_ADDRESS_UNREACHABLE|TIMED_OUT|Timeout/i.test(text)) {
+    return '。目标地址不可达：请确认基础 URL 正确、服务已启动、网络通畅。';
+  }
+  return '';
 }
 
 async function cmdStart(params) {
@@ -1365,6 +1479,21 @@ async function cmdStart(params) {
         height: Math.max(240, Math.min(1200, params.viewport.height || 900)) }
     : { width: 1400, height: 900 };
   state.viewport = viewport;
+
+  // HTTPS 客户端证书与「忽略服务端证书错误」：平台（Django）已完成 origin 归一化
+  // 与三态解析，这里只做形状校验后**粘性保存**——switch_context / reset_context
+  // 重建上下文时复用同一套配置，多步骤用例切登录态后证书不会丢。
+  state.clientCertificates = normalizeClientCertificates(params.client_certificates);
+  state.ignoreHTTPSErrors = params.ignore_https_errors === true;
+  if (state.clientCertificates.length > 0) {
+    serverLog(
+      '客户端证书已启用，生效 origin:',
+      state.clientCertificates.map((c) => c.origin).join(', '),
+      '| ignoreHTTPSErrors:',
+      state.ignoreHTTPSErrors,
+    );
+    warnIfPlaywrightTooOld(skillDir, state.clientCertificates.length);
+  }
 
   const launchOptions = {
     headless: process.env.HEADLESS !== 'false',
@@ -1401,7 +1530,11 @@ async function cmdStart(params) {
     try {
       await state.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
-      serverLog('初始导航失败:', e && e.message ? e.message : String(e));
+      // 导航失败过去只写 stderr（且 Python 侧仅 DEBUG 记录）→ 前端只看到空白画布，
+      // 完全无从判断原因。这里主动上报状态事件，前端录制弹窗会弹 Message.error。
+      const msg = e && e.message ? e.message : String(e);
+      serverLog('初始导航失败:', msg);
+      reportStatus('error', '初始导航失败: ' + msg + navigationHint(msg));
     }
     state.startedUrl = url;
     state.lastNavUrl = url;
@@ -1915,9 +2048,11 @@ async function cmdRunSteps(params) {
         resultEntry.duration = (Date.now() - stepStart) / 1000;
         if (err) {
           failedStep = i;
-          errorMsg = err;
+          // 导航类失败补一句可操作提示：录制器执行 mTLS/自签名站点时，
+          // 报错原文（net::ERR_*）对使用者几乎没有可读性
+          errorMsg = String(err) + navigationHint(err);
           resultEntry.status = 'failed';
-          resultEntry.message = String(err).slice(0, 300);
+          resultEntry.message = String(errorMsg).slice(0, 300);
           stepResults.push(resultEntry);
           break;
         }
@@ -1928,7 +2063,8 @@ async function cmdRunSteps(params) {
         await state.page.waitForTimeout(200);
       } catch (e) {
         failedStep = i;
-        errorMsg = '第 ' + (i + 1) + ' 步执行失败: ' + (e && e.message ? e.message : String(e));
+        const rawMsg = e && e.message ? e.message : String(e);
+        errorMsg = '第 ' + (i + 1) + ' 步执行失败: ' + rawMsg + navigationHint(rawMsg);
         resultEntry.status = 'failed';
         resultEntry.message = errorMsg.slice(0, 300);
         resultEntry.duration = (Date.now() - stepStart) / 1000;
@@ -2121,7 +2257,9 @@ async function cmdResetContext(params) {
       try {
         await state.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       } catch (e) {
-        serverLog('切换账号后导航失败:', e && e.message ? e.message : String(e));
+        const msg = e && e.message ? e.message : String(e);
+        serverLog('切换账号后导航失败:', msg);
+        reportStatus('error', '切换账号后导航失败: ' + msg + navigationHint(msg));
       }
       state.startedUrl = url;
       state.lastNavUrl = url;
@@ -2169,7 +2307,9 @@ async function cmdResetPage(params) {
   try {
     await state.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
   } catch (e) {
-    serverLog('重建后导航失败:', e && e.message ? e.message : String(e));
+    const msg = e && e.message ? e.message : String(e);
+    serverLog('重建后导航失败:', msg);
+    reportStatus('error', '重建页面后导航失败: ' + msg + navigationHint(msg));
   }
   try {
     await state.page.keyboard.press('Escape');

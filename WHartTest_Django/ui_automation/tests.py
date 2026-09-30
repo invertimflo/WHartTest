@@ -7,7 +7,15 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework import status
 from client_certificates.models import ClientCertificate
-from client_certificates.services import build_env_client_cert_payload
+from client_certificates.services import (
+    build_env_client_cert_payload,
+    build_recorder_client_certificates,
+    build_recorder_https_payload,
+    env_config_certificate_warnings,
+    normalize_origin,
+    parse_origins,
+    resolve_recorder_ignore_https_errors,
+)
 from projects.models import Project, ProjectMember
 from ui_automation.models import (
     UiCaseStepsDetailed,
@@ -928,6 +936,454 @@ class UiEnvironmentConfigCertificateApiTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('client_certificate', response.data)
+
+    def test_client_cert_warnings_empty_for_https_env(self):
+        """https 环境 + 绑证书：预检无告警。"""
+        certificate = ClientCertificate.objects.create(
+            name='cert-ok',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        response = self.client.post(
+            '/api/ui-automation/env-configs/',
+            self._payload(client_certificate=certificate.id),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['client_cert_warnings'], [])
+
+    def test_client_cert_warnings_when_base_url_not_https(self):
+        """http 环境 + 绑证书：必须提前告警「证书不可能生效」，否则用户到录制才发现白屏。"""
+        certificate = ClientCertificate.objects.create(
+            name='cert-http',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        response = self.client.post(
+            '/api/ui-automation/env-configs/',
+            self._payload(base_url='http://plain.local', client_certificate=certificate.id),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        warnings = response.data['client_cert_warnings']
+        self.assertTrue(warnings)
+        self.assertIn('https', ' '.join(warnings))
+
+    def test_client_cert_warnings_empty_without_certificate(self):
+        response = self.client.post(
+            '/api/ui-automation/env-configs/',
+            self._payload(base_url='http://plain.local'),
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['client_cert_warnings'], [])
+
+
+class UiClientCertificateOriginTests(SimpleTestCase):
+    """origin 归一化：语义必须与执行器 WHartTest_Actuator/client_cert.py 完全一致。
+
+    两侧对同一个 base_url 必须推导出同一个 origin，否则会出现「执行器能用、
+    本地录制器不能用」这类极难定位的偏差。
+    """
+
+    def test_https_only(self):
+        self.assertEqual(normalize_origin('http://a.local'), None)
+        self.assertEqual(normalize_origin('ftp://a.local'), None)
+        self.assertEqual(normalize_origin('file:///tmp/x'), None)
+        self.assertEqual(normalize_origin('https://a.local'), 'https://a.local')
+
+    def test_drops_path_query_fragment_userinfo(self):
+        self.assertEqual(
+            normalize_origin('https://u:p@a.local:8443/app/x?y=1#z'),
+            'https://a.local:8443',
+        )
+
+    def test_explicit_443_is_folded(self):
+        self.assertEqual(normalize_origin('https://a.local:443/x'), 'https://a.local')
+
+    def test_non_default_port_kept(self):
+        self.assertEqual(normalize_origin('https://192.168.3.112:9443'), 'https://192.168.3.112:9443')
+
+    def test_ipv6_rebracketed(self):
+        self.assertEqual(normalize_origin('https://[::1]:8443/x'), 'https://[::1]:8443')
+        self.assertEqual(normalize_origin('https://[::1]/x'), 'https://[::1]')
+
+    def test_invalid_inputs(self):
+        for value in (None, '', '   ', 123, [], 'https://'):
+            self.assertIsNone(normalize_origin(value))
+
+    def test_parse_origins_dedupes_and_keeps_order(self):
+        origins = parse_origins(
+            'https://b.local,https://a.local',
+            ['https://a.local/', 'http://ignored.local'],
+            None,
+        )
+        self.assertEqual(origins, ['https://b.local', 'https://a.local'])
+
+    def test_parse_origins_empty(self):
+        self.assertEqual(parse_origins(None, '', []), [])
+
+
+class UiRecorderClientCertPayloadTests(TestCase):
+    """本地录制器侧的证书载荷：本地路径 + 预校验 + 三态 ignore。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._media_root = tempfile.mkdtemp(prefix='wharttest-recorder-cert-')
+        cls._override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._override.enable()
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+
+    def setUp(self):
+        from ui_automation.models import UiEnvironmentConfig
+
+        self.UiEnvironmentConfig = UiEnvironmentConfig
+        self.project = Project.objects.create(name='Recorder Cert Project')
+        self.user = User.objects.create_user(username='rec-cert', password='x')
+
+    # ---- 测试材料 ----
+
+    def _pkcs12_bytes(self, passphrase=None):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.serialization import pkcs12
+
+        key, cert = _self_signed_pair()
+        encryption = (
+            serialization.BestAvailableEncryption(passphrase.encode('utf-8'))
+            if passphrase
+            else serialization.NoEncryption()
+        )
+        return pkcs12.serialize_key_and_certificates(
+            b'wharttest', key, cert, None, encryption,
+        )
+
+    def _asset(self, data, name, extension):
+        return FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            file=ContentFile(data, name=name),
+            original_name=name,
+            extension=extension,
+            size=len(data),
+        )
+
+    def _env(self, certificate, base_url='https://192.168.3.112', **extra):
+        return self.UiEnvironmentConfig.objects.create(
+            project=self.project,
+            name='rec-env',
+            base_url=base_url,
+            client_certificate=certificate,
+            creator=self.user,
+            **extra,
+        )
+
+    def _pkcs12_cert(self, passphrase='p@ss'):
+        asset = self._asset(self._pkcs12_bytes(passphrase), 'client.p12', '.p12')
+        certificate = ClientCertificate.objects.create(
+            name='rec-p12',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=asset,
+            created_by=self.user,
+        )
+        if passphrase:
+            certificate.set_passphrase(passphrase)
+            certificate.save(update_fields=['passphrase_encrypted'])
+        return certificate
+
+    # ---- PKCS#12 ----
+
+    def test_pkcs12_entry_is_camelcase_with_passphrase(self):
+        certificate = self._pkcs12_cert('p@ss')
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry['origin'], 'https://192.168.3.112')
+        self.assertTrue(entry['pfxPath'].endswith('.p12'))
+        self.assertEqual(entry['passphrase'], 'p@ss')
+        # snake_case 会被 Playwright 静默忽略 —— 必须保证不出现
+        self.assertNotIn('pfx_path', entry)
+        self.assertNotIn('certPath', entry)
+
+    def test_pkcs12_wrong_passphrase_degrades_with_warning(self):
+        certificate = self._pkcs12_cert('right')
+        certificate.set_passphrase('wrong')
+        certificate.save(update_fields=['passphrase_encrypted'])
+
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(entries, [])
+        self.assertTrue(warnings)
+        self.assertIn('PKCS#12', warnings[0])
+
+    def test_missing_file_degrades_with_warning(self):
+        certificate = ClientCertificate.objects.create(
+            name='rec-missing',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=None,
+            created_by=self.user,
+        )
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(entries, [])
+        self.assertTrue(warnings)
+
+    # ---- PEM ----
+
+    def test_pem_without_passphrase_uses_original_paths(self):
+        cert_pem, key_pem = _self_signed_pems()
+        cert_asset = self._asset(cert_pem, 'client.pem', '.pem')
+        key_asset = self._asset(key_pem, 'client.key', '.key')
+        certificate = ClientCertificate.objects.create(
+            name='rec-pem',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PEM,
+            cert_file=cert_asset,
+            key_file=key_asset,
+            created_by=self.user,
+        )
+
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(warnings, [])
+        entry = entries[0]
+        self.assertIn('certPath', entry)
+        self.assertIn('keyPath', entry)
+        self.assertNotIn('passphrase', entry)
+        self.assertEqual(entry['keyPath'], key_asset.file.path)
+
+    def test_pem_with_passphrase_decrypts_key_into_cache(self):
+        """PEM 加密私钥：解密后落缓存再交给 Playwright，条目内不带 passphrase。"""
+        from cryptography.hazmat.primitives import serialization
+
+        cert_pem, key_pem = _self_signed_pems(encrypted_passphrase='k@y')
+        cert_asset = self._asset(cert_pem, 'enc.pem', '.pem')
+        key_asset = self._asset(key_pem, 'enc.key', '.key')
+        certificate = ClientCertificate.objects.create(
+            name='rec-pem-enc',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PEM,
+            cert_file=cert_asset,
+            key_file=key_asset,
+            created_by=self.user,
+        )
+        certificate.set_passphrase('k@y')
+        certificate.save(update_fields=['passphrase_encrypted'])
+
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(warnings, [])
+        entry = entries[0]
+        self.assertNotIn('passphrase', entry)
+        self.assertIn('client_cert_cache', entry['keyPath'].replace('\\', '/'))
+        # 解密产物必须真的是「无口令可加载」的私钥
+        with open(entry['keyPath'], 'rb') as fh:
+            serialization.load_pem_private_key(fh.read(), password=None)
+
+    def test_pem_wrong_passphrase_degrades_with_warning(self):
+        cert_pem, key_pem = _self_signed_pems(encrypted_passphrase='k@y')
+        certificate = ClientCertificate.objects.create(
+            name='rec-pem-bad',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PEM,
+            cert_file=self._asset(cert_pem, 'bad.pem', '.pem'),
+            key_file=self._asset(key_pem, 'bad.key', '.key'),
+            created_by=self.user,
+        )
+        certificate.set_passphrase('wrong')
+        certificate.save(update_fields=['passphrase_encrypted'])
+
+        entries, warnings = build_recorder_client_certificates(
+            certificate, origins=['https://192.168.3.112'],
+        )
+        self.assertEqual(entries, [])
+        self.assertTrue(warnings)
+
+    # ---- 兜底与三态 ----
+
+    def test_storage_backend_fallback_writes_to_cache(self):
+        """本地 .path 不可用（S3 等）时应读出字节落缓存，而不是直接放弃。"""
+        from unittest.mock import patch
+
+        certificate = self._pkcs12_cert('p@ss')
+        with patch(
+            'client_certificates.services.asset_filesystem_path', return_value='',
+        ):
+            entries, warnings = build_recorder_client_certificates(
+                certificate, origins=['https://192.168.3.112'],
+            )
+        self.assertEqual(warnings, [])
+        self.assertTrue(entries)
+        self.assertIn('client_cert_cache', entries[0]['pfxPath'].replace('\\', '/'))
+
+    def test_no_origins_returns_warning(self):
+        certificate = self._pkcs12_cert('p@ss')
+        entries, warnings = build_recorder_client_certificates(certificate, origins=[])
+        self.assertEqual(entries, [])
+        self.assertTrue(warnings)
+        self.assertIn('origin', warnings[0])
+
+    def test_multiple_origins_produce_one_entry_each(self):
+        certificate = self._pkcs12_cert('p@ss')
+        entries, _ = build_recorder_client_certificates(
+            certificate, origins=['https://a.local', 'https://b.local:8443'],
+        )
+        self.assertEqual([e['origin'] for e in entries], ['https://a.local', 'https://b.local:8443'])
+
+    def test_ignore_https_errors_tristate(self):
+        """None=auto（有证书才忽略）/ True / False 强制覆盖。"""
+        class _Env:
+            def __init__(self, value):
+                self.ignore_https_errors = value
+
+        entries = [{'origin': 'https://a.local'}]
+        self.assertIs(resolve_recorder_ignore_https_errors(_Env(None), entries), True)
+        self.assertIs(resolve_recorder_ignore_https_errors(_Env(None), []), False)
+        self.assertIs(resolve_recorder_ignore_https_errors(_Env(True), []), True)
+        self.assertIs(resolve_recorder_ignore_https_errors(_Env(False), entries), False)
+
+    def test_build_payload_without_certificate(self):
+        env = self._env(None)
+        payload = build_recorder_https_payload(env)
+        self.assertEqual(payload['client_certificates'], [])
+        self.assertEqual(payload['warnings'], [])
+        self.assertFalse(payload['ignore_https_errors'])
+
+    def test_build_payload_auto_ignores_when_cert_applies(self):
+        env = self._env(self._pkcs12_cert('p@ss'))
+        payload = build_recorder_https_payload(env)
+        self.assertEqual(len(payload['client_certificates']), 1)
+        self.assertTrue(payload['ignore_https_errors'])
+        self.assertEqual(payload['warnings'], [])
+
+    def test_build_payload_http_base_url_warns_and_degrades(self):
+        env = self._env(self._pkcs12_cert('p@ss'), base_url='http://plain.local')
+        payload = build_recorder_https_payload(env)
+        self.assertEqual(payload['client_certificates'], [])
+        self.assertTrue(payload['warnings'])
+        # 证书没生效 → auto 不应放宽 HTTPS 校验
+        self.assertFalse(payload['ignore_https_errors'])
+
+    def test_build_payload_uses_extra_urls_for_origin(self):
+        env = self._env(self._pkcs12_cert('p@ss'), base_url='')
+        payload = build_recorder_https_payload(env, extra_urls=['https://page.local/x'])
+        self.assertEqual(
+            [e['origin'] for e in payload['client_certificates']], ['https://page.local'],
+        )
+
+    def test_build_payload_without_origin_warns(self):
+        env = self._env(self._pkcs12_cert('p@ss'), base_url='')
+        payload = build_recorder_https_payload(env)
+        self.assertEqual(payload['client_certificates'], [])
+        self.assertTrue(payload['warnings'])
+
+    def test_env_config_warnings_flags_disabled_certificate(self):
+        certificate = self._pkcs12_cert('p@ss')
+        certificate.is_active = False
+        certificate.save(update_fields=['is_active'])
+        env = self._env(certificate)
+        warnings = env_config_certificate_warnings(env)
+        self.assertTrue(any('禁用' in w for w in warnings))
+
+    def test_env_config_warnings_empty_when_usable(self):
+        env = self._env(self._pkcs12_cert('p@ss'))
+        self.assertEqual(env_config_certificate_warnings(env), [])
+
+    def test_recorder_start_params_carry_certificate(self):
+        """端到端：环境配置绑定的证书必须真正出现在 recorder start 参数里。"""
+        from unittest.mock import Mock, patch
+
+        from ui_automation.recorder.session_manager import RecorderSessionMeta
+        from ui_automation.views import _start_recorder_session
+
+        env = self._env(self._pkcs12_cert('p@ss'))
+        meta = RecorderSessionMeta(
+            user_id='u1', project_id=self.project.id, page_id=None, page_step_id=None,
+            create_elements=False, create_steps=False, base_url='https://192.168.3.112',
+            viewport={'width': 1400, 'height': 900}, kind='record', env_config_id=env.id,
+        )
+        session = Mock()
+        session.start = Mock(return_value=None)
+        session.request = Mock(return_value={
+            'ok': True, 'state': {'viewport': {'width': 1400, 'height': 900}},
+        })
+        with patch('ui_automation.recorder.session_manager.recorder_manager') as rm:
+            rm.create_session.return_value = session
+            _sid, _vp, _pre, warnings = _start_recorder_session(
+                env_config=env, page=None, base_url='https://192.168.3.112',
+                skill_dir='/tmp/x',
+                request=type('R', (), {'user': type('U', (), {'username': 'u1'})()})(),
+                meta=meta,
+            )
+
+        params = session.request.call_args_list[0].args[1]
+        entries = params['client_certificates']
+        self.assertEqual(entries[0]['origin'], 'https://192.168.3.112')
+        self.assertIn('pfxPath', entries[0])
+        self.assertIs(params['ignore_https_errors'], True)
+        self.assertEqual(warnings, [])
+
+
+def _self_signed_pair():
+    """生成一张自签名证书 + 私钥（测试用，避免引入静态二进制夹具）。"""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    import datetime
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'wharttest-test')])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=30))
+        .sign(key, hashes.SHA256())
+    )
+    return key, certificate
+
+
+def _self_signed_pems(encrypted_passphrase=None):
+    """返回 (证书 PEM bytes, 私钥 PEM bytes)；给了口令则私钥为加密 PEM。"""
+    from cryptography.hazmat.primitives import serialization
+
+    key, certificate = _self_signed_pair()
+    cert_pem = certificate.public_bytes(serialization.Encoding.PEM)
+    encryption = (
+        serialization.BestAvailableEncryption(encrypted_passphrase.encode('utf-8'))
+        if encrypted_passphrase
+        else serialization.NoEncryption()
+    )
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        encryption,
+    )
+    return cert_pem, key_pem
 
 
 class UiEnvironmentConfigNullCertificateApiTests(TestCase):

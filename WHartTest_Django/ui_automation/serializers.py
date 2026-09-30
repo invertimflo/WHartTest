@@ -428,6 +428,7 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     auth_state_active = serializers.SerializerMethodField()
     client_cert_info = serializers.SerializerMethodField()
+    client_cert_warnings = serializers.SerializerMethodField()
 
     # fields='__all__' 下只覆写此字段：本模型唯一的可空外键。
     # 允许前端用 '' / 'null' / 'undefined' 等哨兵字符串表达「不关联」；
@@ -459,6 +460,20 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
             'has_passphrase': certificate.has_passphrase,
             'is_active': certificate.is_active,
         }
+
+    def get_client_cert_warnings(self, obj) -> list:
+        """客户端证书预检告警（只读，**绝不含口令明文**）。
+
+        回答「这张证书在这个环境里有没有可能生效」——base_url 非 https、origin
+        推导不出、证书被禁用/文件缺失等。让用户在前端保存环境配置时就能看到问题，
+        而不是等到录制/执行时只看到白屏。
+        """
+        from client_certificates.services import env_config_certificate_warnings
+
+        try:
+            return env_config_certificate_warnings(obj)
+        except Exception:  # noqa: BLE001 - 预检失败不应影响配置读写
+            return []
 
     def validate(self, attrs):
         """证书必须与环境中同项目。

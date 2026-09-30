@@ -938,6 +938,9 @@ async function handleStart() {
     }))
     if (!info) throw new Error(text.value.startFailed)
     if (info.pre_failed) Message.error(text.value.preFailed)
+    // 客户端证书/HTTPS 告警（如证书口令错误导致未生效）：必须提示，否则用户
+    // 只会看到一片空白画布，无从判断是站点问题还是证书问题
+    info.warnings?.forEach((warn) => Message.warning(warn))
     sessionId.value = info.session_id
     viewport.width = info.viewport?.width || 1400
     viewport.height = info.viewport?.height || 900
@@ -1436,6 +1439,9 @@ function onRecorderStatus(data: any) {
   if (status === 'error') {
     assertActive.value = false
     Message.error(args.message || text.value.assertFailed)
+  } else if (status === 'warning') {
+    // 运行期非致命告警（如 Playwright 版本过低导致客户端证书被忽略）
+    Message.warning(args.message || text.value.assertFailed)
   } else if (status === 'asserted') {
     Message.success(text.value.assertRecorded)
   } else if (status === 'upload_located') {

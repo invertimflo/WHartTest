@@ -1551,11 +1551,22 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
     """创建录制会话并启动浏览器（含可选前置步骤执行）。
 
     失败时关闭会话并抛出 RecorderSessionError（detail 可直接展示给用户）。
-    返回 (session_id, viewport, pre_result)。
+    返回 (session_id, viewport, pre_result, warnings)。
+
+    HTTPS 客户端证书与「忽略服务端证书错误」在本函数一并下发：录制器是本地 Node
+    进程，与 Django 同机，因此直接给**本地文件路径**（Django 侧完成 origin 归一化
+    与三态解析），口令经 stdin JSON-RPC 与登录态同通道传递，只存在于进程内存。
     """
     from .recorder.session_manager import (
         recorder_manager, RecorderSessionError,
     )
+    from client_certificates.services import build_recorder_https_payload
+
+    # 证书材料准备失败不应阻断录制：降级为「无证书 + 告警」（与执行器同风格）
+    https_payload = build_recorder_https_payload(env_config, extra_urls=[base_url])
+    warnings = list(https_payload.get('warnings') or [])
+    for warning in warnings:
+        logger.warning('录制器 HTTPS 配置告警：%s', warning)
 
     session = recorder_manager.create_session(
         user_id=request.user.username,
@@ -1585,6 +1596,10 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
         }
         if storage_state:
             start_params['storage_state'] = storage_state
+        if https_payload.get('client_certificates'):
+            start_params['client_certificates'] = https_payload['client_certificates']
+        if https_payload.get('ignore_https_errors'):
+            start_params['ignore_https_errors'] = True
         result = session.request('start', start_params, timeout=90)
     except RecorderSessionError:
         recorder_manager.close(session_id, graceful=False)
@@ -1614,7 +1629,7 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
             raise
 
     viewport = result.get('state', {}).get('viewport') or meta.viewport
-    return session_id, viewport, pre_result
+    return session_id, viewport, pre_result, warnings
 
 
 def _serialize_page_step_for_recorder(page_step: UiPageSteps) -> list[dict]:
@@ -1767,7 +1782,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         )
 
         try:
-            session_id, viewport, pre_result = _start_recorder_session(
+            session_id, viewport, pre_result, warnings = _start_recorder_session(
                 env_config=env_config,
                 page=page,
                 base_url=base_url,
@@ -1786,6 +1801,9 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             'page_step_id': page_step.id,
             'pre_executed': pre_result.get('executed', 0),
             'pre_failed': pre_result.get('failed', False),
+            # 客户端证书/HTTPS 相关告警（如证书口令错误导致未启用）——前端据此提示，
+            # 避免用户只看到空白画布却不知原因
+            'warnings': warnings,
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])
@@ -1870,7 +1888,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             env_config_id=env_config.id,
         )
         try:
-            session_id, viewport, _pre = _start_recorder_session(
+            session_id, viewport, _pre, warnings = _start_recorder_session(
                 env_config=env_config,
                 page=None,
                 base_url=env_config.base_url or '',
@@ -1884,6 +1902,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             'session_id': session_id,
             'viewport': viewport,
             'base_url': env_config.base_url or '',
+            'warnings': warnings,
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])

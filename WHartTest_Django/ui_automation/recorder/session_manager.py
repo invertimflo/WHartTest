@@ -39,9 +39,13 @@ def _server_script_path() -> Path:
         return Path(override)
     return RECORDER_SERVER_SCRIPT
 
-# 事件类型
+# 事件类型（与 recorder_server.js 的 pushEvent(event, ...) 取值一一对应）
 EV_FRAME = 'frame'
 EV_ACTIONS = 'actions'
+# 状态/告警事件：录制器的运行期错误（如初始导航失败、证书被忽略）经此直达前端。
+# 历史上 _dispatch_event 引用了本常量却从未定义 —— 一旦有 status 事件便是
+# NameError（读线程直接崩掉，后续所有响应都无法分发），必须保持定义完整。
+EV_STATUS = 'status'
 
 
 class RecorderSessionError(RuntimeError):
@@ -281,7 +285,10 @@ class RecorderSession:
         for line in proc.stderr:
             line = line.strip()
             if line:
-                logger.debug('[recorder stderr] %s', line)
+                # 录制器的 serverLog 全部走 stderr（含「初始导航失败」「忽略客户端证书
+                # 条目」这类关键诊断）。原先用 DEBUG 记录，而 ui_automation logger 又
+                # 没有独立 handler → 白屏等故障在生产上完全无迹可查。提升到 WARNING。
+                logger.warning('[recorder stderr] %s', line)
 
     def _dispatch_event(self, event: str, data: Any) -> None:
         if event == EV_FRAME and isinstance(data, dict):
@@ -293,6 +300,9 @@ class RecorderSession:
         elif event == EV_STATUS:
             with self._state_lock:
                 self._events.append({'type': EV_STATUS, 'data': data})
+        else:
+            # 不静默丢弃：录制器协议演进时便于定位「事件发了但前端没反应」
+            logger.debug('[recorder] 未识别事件 %s: %s', event, data)
 
     # ------------------------------------------------------------------
     # 关闭

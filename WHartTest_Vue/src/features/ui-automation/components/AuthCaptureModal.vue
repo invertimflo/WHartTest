@@ -293,10 +293,16 @@ async function startCapture() {
   hasFrame.value = false
   try {
     await uiWebSocket.connect()
-    const info = extractResponseData<{ session_id: string; viewport?: { width: number; height: number } } | null>(
+    const info = extractResponseData<{
+      session_id: string
+      viewport?: { width: number; height: number }
+      warnings?: string[]
+    } | null>(
       await recorderApi.authCapture(props.env.id),
     )
     if (!info) throw new Error(text.value.startFailed)
+    // 客户端证书/HTTPS 告警：登录态录制的目标站点同样可能需要 mTLS
+    info.warnings?.forEach((warn) => Message.warning(warn))
     sessionId.value = info.session_id
     if (info.viewport?.width && info.viewport?.height) {
       viewport.width = info.viewport.width
@@ -365,16 +371,33 @@ watch(() => props.visible, (v) => {
 })
 
 let offFrame: (() => void) | null = null
+let offStatus: (() => void) | null = null
 let resizeObserver: ResizeObserver | null = null
+
+/**
+ * 录制器运行期状态：导航失败、证书被忽略等 —— 登录态录制同样需要可见，
+ * 否则用户面对一片空白只能猜测原因。
+ */
+function onRecorderStatus(data: any) {
+  if (!props.visible || !sessionId.value) return
+  const args = data?.data?.func_args || {}
+  if (args.status === 'error') {
+    Message.error(args.message || text.value.startFailed)
+  } else if (args.status === 'warning') {
+    Message.warning(args.message || text.value.startFailed)
+  }
+}
 
 onMounted(() => {
   offFrame = uiWebSocket.on(UiSocketEnum.RECORDER_FRAME, onRecorderFrame as any)
+  offStatus = uiWebSocket.on(UiSocketEnum.RECORDER_STATUS, onRecorderStatus as any)
   resizeObserver = new ResizeObserver(() => fitCanvas())
   if (canvasWrapRef.value) resizeObserver.observe(canvasWrapRef.value)
 })
 
 onUnmounted(() => {
   offFrame?.()
+  offStatus?.()
   resizeObserver?.disconnect()
   resizeObserver = null
   unbindCanvasListeners()
