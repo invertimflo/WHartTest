@@ -7,6 +7,7 @@ tomli_w>=1.0  # TOML配置文件写入
 playwright==1.61.0  # 与 Docker 基础镜像 mcr.microsoft.com/playwright/python:v1.61.0-jammy 保持一致
 pymysql>=1.1.0  # UI SQL步骤执行 MySQL
 ddddocr>=1.4.11  # 验证码智能识别 OCR
+cryptography>=41.0  # 客户端证书材料预校验（PKCS#12/PEM 口令与格式，建上下文前给出明确告警）
 
 # GUI 模式依赖 (设置 use_gui = true 时需要)
 customtkinter>=5.2.2

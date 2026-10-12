@@ -22,7 +22,6 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import Any
 
 # 添加当前目录到路径（支持打包后运行）
 if getattr(sys, 'frozen', False):
@@ -39,13 +38,10 @@ from browser_installer import ensure_browser
 from websocket_client import WebSocketClient
 from consumer import TaskConsumer
 from runtime_env import (
-    FALSE_VALUES,
-    TRUE_VALUES,
     has_display_server,
     is_running_in_container,
     parse_bool_env,
 )
-import client_cert
 
 try:
     import tomllib  # Python 3.11+
@@ -71,26 +67,6 @@ def resolve_config_path(config_path: str) -> Path:
     if getattr(sys, 'frozen', False):
         return _base_path / path
     return path
-
-
-def parse_tri_state_bool(value: Any) -> bool | None:
-    """三态布尔解析：``None`` / ``"auto"`` / 空串 -> ``None``（自动推导）。
-
-    用于 ``ignore_https_errors``：``None`` 表示「跟随 stealth 与证书自动决定」，
-    显式 ``true`` / ``false`` 才强制覆盖。
-    """
-    if value is None:
-        return None
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in ('', 'auto'):
-            return None
-        if normalized in TRUE_VALUES:
-            return True
-        if normalized in FALSE_VALUES:
-            return False
-        return None
-    return bool(value)
 
 
 def ensure_config_file(config_path: Path) -> None:
@@ -124,15 +100,8 @@ user_data_dir = "./data/browser"
 launch_timeout = 30
 action_timeout = 30
 stealth_enabled = true
-# HTTPS 客户端证书（访问双向 TLS 站点时启用）
-client_cert_enabled = false
-# client_cert_pfx_path = "./certs/client.pfx"   # 或 cert+key 的 PEM 方案
-# client_cert_cert_path = "./certs/client.crt"
-# client_cert_key_path = "./certs/client.key"
-# client_cert_origins = "https://a.example.com,https://b.example.com:8443"
-# ignore_https_errors = "auto"   # auto/true/false；auto 跟随 stealth 与证书
-# 口令请用环境变量注入，不要写在此处：
-#   WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE
+# HTTPS 客户端证书请在 Web 端「接口自动化 / UI 自动化 → 环境管理 → 客户端证书」
+# 统一配置：保存 UI 自动化环境并绑定证书后，执行时会自动随任务下发，无需在此配置。
 
 [execution]
 retry_count = 3
@@ -156,6 +125,25 @@ language = "zh"
 """,
         encoding='utf-8',
     )
+
+
+# 已废弃的节点级 HTTPS 客户端证书配置。
+# 现由 Web 端「客户端证书」统一管理：保存 UI 自动化环境时按环境配置随任务下发，
+# 执行器不再读取 config.toml / 环境变量中的这些键；此处仅用于提示迁移。
+_LEGACY_CLIENT_CERT_KEYS = (
+    'client_cert_enabled', 'client_cert_pfx_path', 'client_cert_passphrase',
+    'client_cert_cert_path', 'client_cert_key_path', 'client_cert_origins',
+    'ignore_https_errors',
+)
+_LEGACY_CLIENT_CERT_ENV_VARS = (
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_ENABLED',
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_PFX_PATH',
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE',
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_CERT_PATH',
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_KEY_PATH',
+    'WHARTTEST_ACTUATOR_CLIENT_CERT_ORIGINS',
+    'WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS',
+)
 
 
 class Config:
@@ -189,18 +177,9 @@ class Config:
         self.stealth_enabled = True
         self.stealth_user_agent: str | None = None
 
-        # HTTPS 客户端证书（节点级配置，详见 client_cert.py）
-        self.client_cert_enabled = False
-        self.client_cert_pfx_path: str | None = None
-        self.client_cert_passphrase: str | None = None
-        self.client_cert_cert_path: str | None = None
-        self.client_cert_key_path: str | None = None
-        self.client_cert_origins: str | None = None
-        # 三态：None=auto（跟随 stealth 与是否配置证书），True/False=强制覆盖
-        self.ignore_https_errors: bool | None = None
-        # 证书相对路径的基准目录，由 main() 赋值为 config.toml 所在目录。
-        # 不能依赖 cwd —— 非 frozen 模式下不会 chdir。
-        self.config_dir: Path | None = None
+        # HTTPS 客户端证书仅由平台按 UI 环境配置随任务下发（见 executor.py /
+        # consumer.py），执行器不再持有节点级证书配置。
+        # 证书相对路径的基准由平台侧负责，此处不再维护 config_dir。
         
         # 执行配置
         self.retry_count = 3
@@ -272,16 +251,17 @@ class Config:
             self.stealth_enabled = browser.get('stealth_enabled', self.stealth_enabled)
             self.stealth_user_agent = browser.get('stealth_user_agent', self.stealth_user_agent)
 
-            # HTTPS 客户端证书
-            self.client_cert_enabled = bool(browser.get('client_cert_enabled', self.client_cert_enabled))
-            self.client_cert_pfx_path = browser.get('client_cert_pfx_path', self.client_cert_pfx_path)
-            self.client_cert_passphrase = browser.get('client_cert_passphrase', self.client_cert_passphrase)
-            self.client_cert_cert_path = browser.get('client_cert_cert_path', self.client_cert_cert_path)
-            self.client_cert_key_path = browser.get('client_cert_key_path', self.client_cert_key_path)
-            self.client_cert_origins = browser.get('client_cert_origins', self.client_cert_origins)
-            if 'ignore_https_errors' in browser:
-                self.ignore_https_errors = parse_tri_state_bool(browser.get('ignore_https_errors'))
-        
+            # 节点级 HTTPS 客户端证书配置已废弃（改由 Web 端统一管理并随任务下发），
+            # 只提示迁移、不再读取，避免与平台配置产生歧义。
+            legacy_keys = [key for key in _LEGACY_CLIENT_CERT_KEYS if key in browser]
+            if legacy_keys:
+                logging.warning(
+                    "config.toml [browser] 中的 %s 已不再生效：HTTPS 客户端证书请改在 "
+                    "Web 端「接口自动化 / UI 自动化 → 环境管理 → 客户端证书」统一配置，"
+                    "保存环境时自动下发到执行器；建议从 config.toml 删除这些键。",
+                    ', '.join(legacy_keys),
+                )
+
         # 执行配置
         if 'execution' in data:
             execution = data['execution']
@@ -337,22 +317,16 @@ class Config:
         if stealth_user_agent := os.environ.get('WHARTTEST_ACTUATOR_STEALTH_USER_AGENT'):
             self.stealth_user_agent = stealth_user_agent.strip()
 
-        # 客户端证书：口令用 os.environ.pop 读取（读完即从环境移除），
-        # 避免通过环境变量泄漏给后续启动的子进程。
-        if cert_pfx := os.environ.get('WHARTTEST_ACTUATOR_CLIENT_CERT_PFX_PATH'):
-            self.client_cert_pfx_path = cert_pfx.strip()
-        if cert_passphrase := os.environ.pop('WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE', None):
-            self.client_cert_passphrase = cert_passphrase.strip()
-        if cert_cert := os.environ.get('WHARTTEST_ACTUATOR_CLIENT_CERT_CERT_PATH'):
-            self.client_cert_cert_path = cert_cert.strip()
-        if cert_key := os.environ.get('WHARTTEST_ACTUATOR_CLIENT_CERT_KEY_PATH'):
-            self.client_cert_key_path = cert_key.strip()
-        if cert_origins := os.environ.get('WHARTTEST_ACTUATOR_CLIENT_CERT_ORIGINS'):
-            self.client_cert_origins = cert_origins.strip()
-
-        # ignore_https_errors 是三态：未设置或 "auto" 都保持 None（自动推导）
-        if (raw_ignore := os.environ.get('WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS')) is not None:
-            self.ignore_https_errors = parse_tri_state_bool(raw_ignore)
+        # 节点级 HTTPS 客户端证书环境变量已废弃（改由 Web 端统一管理并随任务下发）。
+        legacy_env = [name for name in _LEGACY_CLIENT_CERT_ENV_VARS if os.environ.get(name)]
+        if legacy_env:
+            logging.warning(
+                "环境变量 %s 已不再生效：HTTPS 客户端证书请改在 "
+                "Web 端「接口自动化 / UI 自动化 → 环境管理 → 客户端证书」统一配置。",
+                ', '.join(legacy_env),
+            )
+        # 口令不再使用，读完即从环境移除，避免泄漏给后续启动的子进程
+        os.environ.pop('WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE', None)
 
         bool_env_map = {
             'WHARTTEST_ACTUATOR_USE_GUI': 'use_gui',
@@ -360,46 +334,11 @@ class Config:
             'WHARTTEST_ACTUATOR_PERSISTENT': 'persistent',
             'WHARTTEST_ACTUATOR_TRACE_ENABLED': 'trace_enabled',
             'WHARTTEST_ACTUATOR_STEALTH_ENABLED': 'stealth_enabled',
-            'WHARTTEST_ACTUATOR_CLIENT_CERT_ENABLED': 'client_cert_enabled',
         }
         for env_name, attr_name in bool_env_map.items():
             env_value = parse_bool_env(os.environ.get(env_name))
             if env_value is not None:
                 setattr(self, attr_name, env_value)
-
-    def resolve_client_cert_paths(self) -> dict:
-        """解析客户端证书文件的绝对路径，并做启动期校验。
-
-        相对路径一律以 ``config_dir``（config.toml 所在目录）为基准 —— 非 frozen 模式
-        不会 chdir，依赖 cwd 会得到不可预期的结果。
-
-        返回解析结果 dict（``pfx`` / ``cert`` / ``key``，可能是 ``None``）。
-        校验问题只记告警，不抛异常：证书是可选特性，不应阻断执行器启动。
-        """
-        base_dir = self.config_dir
-        resolved = {
-            'pfx': client_cert.resolve_cert_path(self.client_cert_pfx_path, base_dir),
-            'cert': client_cert.resolve_cert_path(self.client_cert_cert_path, base_dir),
-            'key': client_cert.resolve_cert_path(self.client_cert_key_path, base_dir),
-        }
-
-        if not self.client_cert_enabled:
-            return resolved
-
-        for warning in client_cert.validate_cert_files(
-            pfx_path=resolved['pfx'],
-            cert_path=resolved['cert'],
-            key_path=resolved['key'],
-        ):
-            logging.warning("客户端证书配置告警：%s", warning)
-
-        if resolved['pfx'] is None and (resolved['cert'] is None or resolved['key'] is None):
-            logging.warning(
-                "客户端证书已启用但未配置完整证书文件"
-                "（需 client_cert_pfx_path，或 client_cert_cert_path + client_cert_key_path）"
-            )
-
-        return resolved
 
     def normalize_for_runtime(self) -> None:
         """根据运行环境修正配置，保证容器中可直接使用。"""
@@ -514,8 +453,6 @@ async def main():
     
     # 加载配置
     config = Config()
-    # 证书相对路径的基准目录固定为 config.toml 所在目录
-    config.config_dir = config_path.parent.resolve()
     config.load_from_toml(str(config_path))
     config.load_from_env()
     config.apply_args(args)
@@ -523,7 +460,6 @@ async def main():
     # 配置日志
     setup_logging(config.log_level, config.log_file)
     config.normalize_for_runtime()
-    config.resolve_client_cert_paths()
     ensure_runtime_dirs(config)
     logger = logging.getLogger('actuator')
     

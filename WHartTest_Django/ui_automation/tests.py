@@ -1,14 +1,18 @@
+import asyncio
 import shutil
 import tempfile
 
+from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.core.files.base import ContentFile
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.db import connections
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 from rest_framework import status
 from client_certificates.models import ClientCertificate
 from client_certificates.services import (
     build_env_client_cert_payload,
+    build_env_client_cert_payload_async,
     build_recorder_client_certificates,
     build_recorder_https_payload,
     env_config_certificate_warnings,
@@ -866,6 +870,106 @@ class UiClientCertPayloadTests(TestCase):
         original = {'client_cert': {'passphrase': 'keep-me'}}
         UiAutomationConsumer._sanitize_result_args(original)
         self.assertEqual(original['client_cert']['passphrase'], 'keep-me')
+
+
+class UiClientCertPayloadAsyncContextTests(TransactionTestCase):
+    """WebSocket 异步 consumer 路径：证书载荷必须在事件循环内也能构建出来。
+
+    回归背景（线上 BUG）：`_prepare_task_dispatch` 直接在 async consumer 里调用同步版
+    `build_env_client_cert_payload`，懒加载 `client_certificate` → `cert_file` 外键触发
+    `SynchronousOnlyOperation`，又被其兜底 except 吞成「本次不启用客户端证书」——
+    结果是 Web 上配了证书的环境，执行器永远收不到 `client_cert`，mTLS 站点只剩
+    「空白页 + 400 Bad Request」，日志里只有一条不起眼的 WARNING。
+
+    用 TransactionTestCase（真实提交）而非 TestCase：sync_to_async 会把 DB 访问丢到
+    另一个线程，事务未提交的数据在那边不可见。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._media_root = tempfile.mkdtemp(prefix='wharttest-ui-cert-async-test-')
+        cls._override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._override.enable()
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        cls._override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+
+    def setUp(self):
+        from ui_automation.models import UiEnvironmentConfig
+
+        self.UiEnvironmentConfig = UiEnvironmentConfig
+        self.project = Project.objects.create(name='UI Cert Async Project')
+        self.user = User.objects.create_user(username='ui-cert-async-user', password='x')
+        self.asset = FileAsset.objects.create(
+            project=self.project,
+            owner=self.user,
+            file=ContentFile(b'fake-pfx-bytes', name='client.p12'),
+            original_name='client.p12',
+            extension='.p12',
+            size=14,
+        )
+        certificate = ClientCertificate.objects.create(
+            name='ui-cert-async',
+            project=self.project,
+            cert_type=ClientCertificate.CERT_TYPE_PKCS12,
+            cert_file=self.asset,
+            created_by=self.user,
+        )
+        certificate.set_passphrase('ui-pass')
+        certificate.save(update_fields=['passphrase_encrypted'])
+        self.env = self.UiEnvironmentConfig.objects.create(
+            project=self.project,
+            name='ui-env-async',
+            base_url='https://ui.local',
+            client_certificate=certificate,
+            creator=self.user,
+        )
+
+    def _fresh_env(self):
+        """重新查库取环境对象。
+
+        刻意不复用 setUp 里 create() 出来的实例：Django 在 ``create(client_certificate=...)``
+        时会把外键对象写进字段缓存，之后再访问不会触发查询，也就复现不出问题。
+        consumer 的 ``_load_env_config`` 走 ``filter(id=...).first()``，外键是**未预热**
+        的懒加载，这才是线上真实的起始状态。
+        """
+        return self.UiEnvironmentConfig.objects.get(id=self.env.id)
+
+    def test_async_helper_builds_payload_inside_event_loop(self):
+        """异步版本在事件循环内必须拿到完整载荷（修复前这里恒为 None）。"""
+        env = self._fresh_env()
+
+        async def _run():
+            payload = await build_env_client_cert_payload_async(env)
+            # sync_to_async 会在线程池里另开一条 DB 连接；测试收尾要删库，必须在同一线程
+            # 内先关掉它，否则 teardown 报 "database is being accessed by other users"。
+            await sync_to_async(connections.close_all)()
+            return payload
+
+        payload = asyncio.run(_run())
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload['cert_type'], 'pkcs12')
+        self.assertEqual(payload['passphrase'], 'ui-pass')
+        self.assertEqual(payload['cert_file']['file_id'], self.asset.id)
+        self.assertEqual(payload['origins'], ['https://ui.local'])
+
+    def test_raw_builder_degrades_silently_in_event_loop(self):
+        """同步版本在事件循环内会静默退化成 None —— 这正是本 BUG 的成因。
+
+        该断言用来钉住「为什么必须用 *_async 版本」：如果有人把这条路径改回直接调用
+        同步版本，上面的用例会失败，而本条用例说明失败时的真实表现是「无异常、无证书」。
+        """
+        env = self._fresh_env()  # 同步上下文取库，外键保持未预热的懒加载状态
+
+        async def _call():
+            return build_env_client_cert_payload(env)
+
+        self.assertIsNone(asyncio.run(_call()))
 
 
 class UiEnvironmentConfigCertificateApiTests(TestCase):

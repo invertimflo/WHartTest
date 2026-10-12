@@ -5,8 +5,9 @@
 1. client_cert 纯函数：origin 归一化、路径解析、校验、camelCase dict 构造
 2. PlaywrightExecutor._build_browser_context_options 的 ignore_https_errors 三态矩阵
 3. 任务 origin 推导、证书配置幂等性、口令不泄漏
-4. Config.load_from_toml / load_from_env（含三态解析与口令出环境）
-5. consumer 的平台下发通道：字段白名单、日志脱敏、config.toml 往返
+4. 证书材料预校验与「建上下文失败降级」判定
+5. base_url 导航参数（对齐录制器，回归 cn.bing.com 超时 BUG）
+6. 节点级证书配置已彻底移除（config.toml / 环境变量 / 平台白名单 / 执行器上报）
 
 独立运行：python test_client_cert.py
 """
@@ -17,11 +18,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import client_cert
+import executor as executor_module
 from client_cert import (
     build_client_certificates,
     normalize_origin,
@@ -30,12 +33,21 @@ from client_cert import (
     validate_cert_files,
 )
 from executor import PageStepConfig, PlaywrightExecutor, TestCaseConfig
-from main import Config, parse_tri_state_bool
+from main import Config
 from runtime_config import extract_env_policy, normalize_run_options, resolve_from_env_and_actuator
 
 
 # 一个明显的哨兵口令：任何日志里出现它都算泄漏
 SECRET_PASSPHRASE = 'S3cr3t-Passphrase-Must-OnlyDanceInMemory'
+
+# 节点级证书配置的字段名（用于「已移除」的静态回归断言）
+NODE_LEVEL_CERT_KEYS = (
+    'client_cert_enabled',
+    'client_cert_pfx_path',
+    'client_cert_cert_path',
+    'client_cert_key_path',
+    'client_cert_origins',
+)
 
 
 def _write_file(path: Path, content: str = 'dummy') -> Path:
@@ -44,14 +56,38 @@ def _write_file(path: Path, content: str = 'dummy') -> Path:
     return path
 
 
+def _has_cryptography() -> bool:
+    """``cryptography`` 是可选依赖；未安装时跳过真实的证书可加载性预校验。"""
+    try:
+        import cryptography  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+HAS_CRYPTOGRAPHY = _has_cryptography()
+
+
 class ActuatorTestCase(unittest.TestCase):
-    """统一提供临时目录与执行器实例，避免污染工作区。"""
+    """统一提供临时目录与执行器实例，避免污染工作区。
+
+    默认把 ``_precheck_cert_material`` 打桩成「跳过」——本组用例是围绕
+    origin/参数构造/日志脱敏的行为测试，用假的 pfx 字节流即可；真实的可加载性
+    预校验由 ``CertPrecheckTest`` 单独覆盖（那里用真实的 cryptography）。
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        self._precheck_patch = patch.object(
+            executor_module.PlaywrightExecutor,
+            '_precheck_cert_material',
+            return_value=None,
+        )
+        self._precheck_patch.start()
 
     def tearDown(self):
+        self._precheck_patch.stop()
         self._tmp.cleanup()
 
     def make_executor(self, **overrides) -> PlaywrightExecutor:
@@ -167,6 +203,11 @@ class ResolveCertPathTest(unittest.TestCase):
         self.assertIsNone(resolve_cert_path(None, self.tmp))
         self.assertIsNone(resolve_cert_path('', self.tmp))
         self.assertIsNone(resolve_cert_path('   ', self.tmp))
+
+    def test_without_base_dir_defaults_to_cwd(self):
+        """执行器侧只传一个参数：任务下发的证书路径恒为绝对路径，故不会再走相对分支。"""
+        resolved = resolve_cert_path('certs/client.pfx')
+        self.assertEqual(resolved, (Path.cwd() / 'certs' / 'client.pfx').resolve())
 
 
 class ValidateCertFilesTest(unittest.TestCase):
@@ -299,7 +340,7 @@ class BuildClientCertificatesTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. ignore_https_errors 三态矩阵
+# 2. ignore_https_errors 三态矩阵（节点级配置已移除，仅剩 runtime 下发通道）
 # ---------------------------------------------------------------------------
 
 class ContextOptionsMatrixTest(ActuatorTestCase):
@@ -332,20 +373,34 @@ class ContextOptionsMatrixTest(ActuatorTestCase):
             [{'origin': 'https://a.example.com', 'pfxPath': str(files['pfx'])}],
         )
 
-    def test_explicit_false_overrides_stealth_default(self):
-        executor = self.make_executor(stealth_enabled=True, ignore_https_errors=False)
+    def test_runtime_false_overrides_stealth_default(self):
+        """任务级 runtime 显式 false 时，即便 stealth 打开也不再容忍证书错误。"""
+        executor = self.make_executor(stealth_enabled=True)
+        executor.apply_runtime_options({'browser': 'chromium', 'ignore_https_errors': False})
         options = executor._build_browser_context_options()
         self.assertNotIn('ignore_https_errors', options)
 
-    def test_explicit_true_overrides_stealth_off(self):
-        executor = self.make_executor(stealth_enabled=False, ignore_https_errors=True)
+    def test_runtime_true_overrides_stealth_off(self):
+        executor = self.make_executor(stealth_enabled=False)
+        executor.apply_runtime_options({'browser': 'chromium', 'ignore_https_errors': True})
         options = executor._build_browser_context_options()
         self.assertIs(options['ignore_https_errors'], True)
 
-    def test_explicit_auto_is_none(self):
-        executor = self.make_executor(stealth_enabled=False, ignore_https_errors=None)
+    def test_runtime_none_keeps_auto(self):
+        executor = self.make_executor(stealth_enabled=False)
+        executor.apply_runtime_options({'browser': 'chromium', 'ignore_https_errors': None})
+        self.assertIsNone(executor.ignore_https_errors)
         options = executor._build_browser_context_options()
         self.assertNotIn('ignore_https_errors', options)
+
+    def test_restore_resets_tri_state(self):
+        executor = self.make_executor(stealth_enabled=False)
+        previous = executor.apply_runtime_options(
+            {'browser': 'chromium', 'ignore_https_errors': True}
+        )
+        self.assertIs(executor.ignore_https_errors, True)
+        executor.restore_runtime_options(previous)
+        self.assertIsNone(executor.ignore_https_errors)
 
     def test_viewport_still_applied_when_stealth_off(self):
         """重构时把证书逻辑提到了早退分支之前，确认原视口行为未被破坏。"""
@@ -398,7 +453,7 @@ class CertWarningDedupTest(ActuatorTestCase):
 
         self.assertNotIn('client_certificates', options)
         self.assertTrue(
-            any('未配置完整的证书文件' in r.getMessage() for r in captured.records)
+            any('未拿到完整的证书材料' in r.getMessage() for r in captured.records)
         )
 
     def test_disabled_cert_never_warns_or_applies(self):
@@ -598,14 +653,11 @@ class ConfigureClientCertTest(ActuatorTestCase):
         self.assertEqual(executor._client_cert_passphrase, SECRET_PASSPHRASE)
         self.assertEqual(executor._client_cert_origins, 'https://b.com')
 
-    def test_relative_path_resolved_against_config_dir(self):
+    def test_absolute_path_used_directly(self):
+        """任务下发的证书恒为绝对路径（执行器已下载到本地缓存），无需相对路径基准。"""
         files = self.make_cert_files()
         executor = self.make_executor()
-        executor.configure_client_cert(
-            enabled=True,
-            pfx_path='certs/client.pfx',
-            config_dir=str(self.tmp),
-        )
+        executor.configure_client_cert(enabled=True, pfx_path=str(files['pfx']))
         executor.set_task_origins(['https://a.com'])
 
         options = executor._build_browser_context_options()
@@ -613,6 +665,26 @@ class ConfigureClientCertTest(ActuatorTestCase):
             options['client_certificates'][0]['pfxPath'],
             str(files['pfx']),
         )
+
+    def test_reset_material_clears_everything(self):
+        """任务级证书走 reset_material=True，避免上一任务的材料串到本任务。"""
+        files = self.make_cert_files()
+        executor = self.make_executor()
+        executor.configure_client_cert(
+            enabled=True,
+            pfx_path=str(files['pfx']),
+            passphrase=SECRET_PASSPHRASE,
+            cert_path=str(files['cert']),
+            key_path=str(files['key']),
+            origins='https://a.com',
+        )
+        # enable 保持 True（reset 只清材料），但所有材料字段归零
+        executor.configure_client_cert(enabled=True, reset_material=True)
+        self.assertIsNone(executor._client_cert_pfx_path)
+        self.assertIsNone(executor._client_cert_passphrase)
+        self.assertIsNone(executor._client_cert_cert_path)
+        self.assertIsNone(executor._client_cert_key_path)
+        self.assertIsNone(executor._client_cert_origins)
 
     def test_empty_string_clears_path(self):
         files = self.make_cert_files()
@@ -678,32 +750,16 @@ class PassphraseLeakTest(ActuatorTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. Config 解析
+# 4. 证书材料预校验 + 建上下文失败降级
 # ---------------------------------------------------------------------------
 
-class ParseTriStateBoolTest(unittest.TestCase):
-    def test_none_and_auto_map_to_none(self):
-        self.assertIsNone(parse_tri_state_bool(None))
-        self.assertIsNone(parse_tri_state_bool('auto'))
-        self.assertIsNone(parse_tri_state_bool('AUTO'))
-        self.assertIsNone(parse_tri_state_bool(''))
-        self.assertIsNone(parse_tri_state_bool('   '))
+class CertPrecheckTest(unittest.TestCase):
+    """``_precheck_cert_material``：把「口令错误 / 格式不支持」提前变成明确原因。
 
-    def test_truthy_and_falsy_strings(self):
-        for raw in ('true', 'TRUE', '1', 'yes', 'on'):
-            self.assertIs(parse_tri_state_bool(raw), True, msg=raw)
-        for raw in ('false', 'FALSE', '0', 'no', 'off'):
-            self.assertIs(parse_tri_state_bool(raw), False, msg=raw)
+    这里用真实 ``cryptography``（若未安装则跳过），因为预校验的整个意义就是
+    「真读一遍文件」。
+    """
 
-    def test_booleans_pass_through(self):
-        self.assertIs(parse_tri_state_bool(True), True)
-        self.assertIs(parse_tri_state_bool(False), False)
-
-    def test_unknown_string_falls_back_to_auto(self):
-        self.assertIsNone(parse_tri_state_bool('maybe'))
-
-
-class ConfigTomlTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
@@ -711,150 +767,331 @@ class ConfigTomlTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _load(self, body: str) -> Config:
-        path = self.tmp / 'config.toml'
-        path.write_text(body, encoding='utf-8')
-        config = Config()
-        config.config_dir = self.tmp
-        config.load_from_toml(str(path))
-        return config
+    def test_no_material_is_skipped(self):
+        # 无任何材料 / PEM 只给一半 → 不判断（交给存在性告警）
+        self.assertIsNone(PlaywrightExecutor._precheck_cert_material(None, None, None, None, None))
+        cert = _write_file(self.tmp / 'client.crt')
+        self.assertIsNone(PlaywrightExecutor._precheck_cert_material(None, None, cert, None, None))
 
-    def test_all_cert_keys_are_read(self):
-        config = self._load(
-            """
-[browser]
-client_cert_enabled = true
-client_cert_pfx_path = "./certs/client.pfx"
-client_cert_passphrase = "pw"
-client_cert_cert_path = "./certs/client.crt"
-client_cert_key_path = "./certs/client.key"
-client_cert_origins = "https://a.example.com"
-ignore_https_errors = true
-"""
+    def test_missing_pfx_is_skipped(self):
+        missing = self.tmp / 'nope.pfx'
+        self.assertIsNone(
+            PlaywrightExecutor._precheck_cert_material(None, missing, None, None, None)
         )
-        self.assertTrue(config.client_cert_enabled)
-        self.assertEqual(config.client_cert_pfx_path, './certs/client.pfx')
-        self.assertEqual(config.client_cert_passphrase, 'pw')
-        self.assertEqual(config.client_cert_cert_path, './certs/client.crt')
-        self.assertEqual(config.client_cert_key_path, './certs/client.key')
-        self.assertEqual(config.client_cert_origins, 'https://a.example.com')
-        self.assertIs(config.ignore_https_errors, True)
 
-    def test_defaults_when_section_is_absent(self):
-        config = self._load('[browser]\nbrowser_type = "chromium"\n')
-        self.assertFalse(config.client_cert_enabled)
-        self.assertIsNone(config.client_cert_pfx_path)
-        self.assertIsNone(config.client_cert_passphrase)
-        self.assertIsNone(config.ignore_https_errors)
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, 'cryptography 未安装（可选依赖），跳过真实预校验')
+    def test_corrupted_pfx_reports_reason(self):
+        bad = _write_file(self.tmp / 'client.pfx', 'NOT-A-REAL-PKCS12')
+        reason = PlaywrightExecutor._precheck_cert_material(None, bad, None, None, None)
+        self.assertIsInstance(reason, str)
+        self.assertIn('材料无法加载', reason)
 
-    def test_ignore_https_errors_auto_in_toml(self):
-        config = self._load('[browser]\nignore_https_errors = "auto"\n')
-        self.assertIsNone(config.ignore_https_errors)
+    @unittest.skipUnless(HAS_CRYPTOGRAPHY, 'cryptography 未安装（可选依赖），跳过真实预校验')
+    def test_corrupted_pem_key_reports_reason(self):
+        cert = _write_file(self.tmp / 'client.crt', 'CERT')
+        key = _write_file(self.tmp / 'client.key', 'NOT-A-REAL-KEY')
+        reason = PlaywrightExecutor._precheck_cert_material(None, None, cert, key, None)
+        self.assertIsInstance(reason, str)
+        self.assertIn('材料无法加载', reason)
 
-    def test_ignore_https_errors_explicit_false(self):
-        config = self._load('[browser]\nignore_https_errors = false\n')
-        self.assertIs(config.ignore_https_errors, False)
+    def test_precheck_failure_disables_cert_and_records_reason(self):
+        """预校验失败 → 不注入证书，并记下原因供结果消息提示。"""
+        file = _write_file(self.tmp / 'client.pfx', 'P12')
+        executor = PlaywrightExecutor(
+            user_data_dir=str(self.tmp / 'browser'),
+            screenshot_dir=str(self.tmp / 'shots'),
+        )
+        with patch.object(
+            PlaywrightExecutor, '_precheck_cert_material', return_value='boom'
+        ):
+            executor.configure_client_cert(enabled=True, pfx_path=str(file))
+            executor.set_task_origins(['https://a.com'])
+            options = executor._build_browser_context_options()
 
-    def test_resolve_client_cert_paths_anchors_to_config_dir(self):
-        _write_file(self.tmp / 'certs' / 'client.pfx')
-        config = self._load('[browser]\nclient_cert_enabled = true\nclient_cert_pfx_path = "certs/client.pfx"\n')
-        resolved = config.resolve_client_cert_paths()
-        self.assertEqual(resolved['pfx'], self.tmp / 'certs' / 'client.pfx')
+        self.assertNotIn('client_certificates', options)
+        self.assertIsNotNone(executor._last_cert_failure)
+        self.assertIn('客户端证书不可用', executor._last_cert_failure)
 
-    def test_resolve_warns_when_file_missing(self):
-        config = self._load('[browser]\nclient_cert_enabled = true\nclient_cert_pfx_path = "nope.pfx"\n')
+
+class IsCertErrorTest(unittest.TestCase):
+    def test_certificate_related_messages_match(self):
+        for text in (
+            'client_certificate invalid',
+            'Client certificate error',
+            'PKCS12 decoding failed',
+            'bad pfx',
+            'wrong passphrase',
+            'certificate verify failed',
+            'SSL handshake failure',
+            'TLS alert',
+        ):
+            self.assertTrue(
+                PlaywrightExecutor._is_cert_error(Exception(text)), msg=text
+            )
+
+    def test_unrelated_messages_do_not_match(self):
+        for text in ('target closed', 'timeout 30000ms exceeded', 'browser has been closed'):
+            self.assertFalse(
+                PlaywrightExecutor._is_cert_error(Exception(text)), msg=text
+            )
+
+
+class InitBrowserContextFallbackTest(unittest.IsolatedAsyncioTestCase):
+    """建上下文因证书失败时，必须降级为「不带 client_certificates」重试一次。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _executor(self) -> PlaywrightExecutor:
+        executor = PlaywrightExecutor(
+            user_data_dir=str(self.tmp / 'browser'),
+            screenshot_dir=str(self.tmp / 'shots'),
+            persistent=False,
+        )
+        executor.browser_type = 'chromium'
+        executor._playwright = SimpleNamespace(chromium=object())
+        executor._page = MagicMock()
+        return executor
+
+    async def test_cert_error_falls_back_and_records_reason(self):
+        executor = self._executor()
+        calls = []
+
+        async def fake_create(browser_launcher, launch_options, context_options):
+            calls.append(dict(context_options))
+            if 'client_certificates' in context_options:
+                raise Exception('pkcs12: unable to load client certificate')
+
+        executor._create_context_page = fake_create
+        with patch.object(
+            executor, '_build_client_certificates',
+            return_value=[{'origin': 'https://a.com', 'pfxPath': '/x.pfx'}],
+        ):
+            await executor._init_browser_context()
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn('client_certificates', calls[0])
+        self.assertNotIn('client_certificates', calls[1])
+        self.assertIsNotNone(executor._last_cert_failure)
+        self.assertIn('降级', executor._last_cert_failure)
+
+    async def test_unrelated_error_is_reraised(self):
+        executor = self._executor()
+
+        async def fake_create(browser_launcher, launch_options, context_options):
+            raise Exception('target closed')
+
+        executor._create_context_page = fake_create
+        with patch.object(
+            executor, '_build_client_certificates',
+            return_value=[{'origin': 'https://a.com', 'pfxPath': '/x.pfx'}],
+        ):
+            with self.assertRaises(Exception) as ctx:
+                await executor._init_browser_context()
+
+        self.assertIn('target closed', str(ctx.exception))
+
+    async def test_no_cert_in_options_means_no_fallback(self):
+        executor = self._executor()
+
+        async def fake_create(browser_launcher, launch_options, context_options):
+            raise Exception('ssl error')
+
+        executor._create_context_page = fake_create
+        with patch.object(executor, '_build_client_certificates', return_value=[]):
+            with self.assertRaises(Exception):
+                await executor._init_browser_context()
+
+    def test_result_messages_carry_cert_failure_hint(self):
+        """结果消息必须带降级提示，否则用户只看到失败却不知道证书问题。"""
+        src = Path(__file__).parent.joinpath('executor.py').read_text(encoding='utf-8')
+        self.assertEqual(
+            src.count("getattr(self, '_last_cert_failure', None)"),
+            2,
+            msg='串行与并发两个执行入口都要附上证书降级提示',
+        )
+        self.assertEqual(src.count('message += f" （提示：{self._last_cert_failure}）"'), 2)
+
+
+# ---------------------------------------------------------------------------
+# 5. base_url 导航参数（回归 cn.bing.com 超时 BUG）
+# ---------------------------------------------------------------------------
+
+class EnvBaseUrlNavigationTest(unittest.TestCase):
+    """环境 base_url 导航必须对齐录制器：domcontentloaded + 30s 显式超时。
+
+    历史 BUG：``wait_until="networkidle"`` 且未显式传 timeout，会落到页面默认
+    超时（= action_timeout，默认 5000ms），导致 cn.bing.com 这类存在持续网络活动
+    的站点必然超时。
+    """
+
+    def test_navigation_constant_matches_recorder(self):
+        self.assertEqual(
+            executor_module._ENV_BASE_URL_NAV,
+            {'wait_until': 'domcontentloaded', 'timeout': 30000},
+        )
+
+    def test_both_entrypoints_use_the_constant(self):
+        src = Path(__file__).parent.joinpath('executor.py').read_text(encoding='utf-8')
+        self.assertEqual(
+            src.count('**_ENV_BASE_URL_NAV'), 2,
+            msg='串行与并发入口的 base_url 导航都要用统一参数',
+        )
+
+    def test_no_networkidle_in_base_url_navigation(self):
+        src = Path(__file__).parent.joinpath('executor.py').read_text(encoding='utf-8')
+        self.assertNotIn(
+            'wait_until="networkidle"', src,
+            msg='base_url 导航不得再用 networkidle（会导致 bing 等站点必然超时）',
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. 节点级证书配置已彻底移除
+# ---------------------------------------------------------------------------
+
+class NodeLevelCertRemovedTest(unittest.TestCase):
+    """防回归：节点级（config.toml / 环境变量 / 平台白名单）证书配置不得复活。
+
+    证书一律由平台「客户端证书」按 UI 自动化环境配置随任务下发，节点只接收
+    任务级参数。任何一处残留都会造成「配置看起来生效、实际被平台覆盖」的歧义。
+    """
+
+    def _repo_file(self, relative: str) -> str:
+        repo_root = Path(__file__).parent.parent
+        path = repo_root / relative
+        self.assertTrue(path.exists(), msg=f'找不到文件: {path}')
+        return path.read_text(encoding='utf-8')
+
+    def test_executor_constructor_rejects_cert_kwargs(self):
+        with self.assertRaises(TypeError):
+            PlaywrightExecutor(client_cert_enabled=True)
+        with self.assertRaises(TypeError):
+            PlaywrightExecutor(ignore_https_errors=True)
+
+    def test_configure_client_cert_has_no_config_dir_param(self):
+        import inspect
+
+        params = inspect.signature(PlaywrightExecutor.configure_client_cert).parameters
+        self.assertNotIn('config_dir', params)
+
+    def test_actuator_config_field_map_excludes_cert_keys(self):
+        from consumer import TaskConsumer
+
+        for key in NODE_LEVEL_CERT_KEYS + ('ignore_https_errors',):
+            self.assertNotIn(key, TaskConsumer._CONFIG_FIELD_MAP, msg=f'残留 {key}')
+
+    def test_django_views_whitelist_excludes_cert_keys(self):
+        views = self._repo_file('WHartTest_Django/ui_automation/views.py')
+        start = views.index('_ACTUATOR_CONFIG_FIELDS = frozenset({')
+        end = views.index('})', start)
+        block = views[start:end]
+        for key in NODE_LEVEL_CERT_KEYS + ('client_cert_passphrase', 'ignore_https_errors'):
+            self.assertNotIn(key, block, msg=f'Django views 白名单残留 {key}')
+
+    def test_django_consumers_config_keys_excludes_cert_keys(self):
+        consumers = self._repo_file('WHartTest_Django/ui_automation/consumers.py')
+        start = consumers.index('config_keys = (')
+        end = consumers.index(')', start)
+        block = consumers[start:end]
+        for key in NODE_LEVEL_CERT_KEYS + ('client_cert_passphrase',):
+            self.assertNotIn(key, block, msg=f'Django consumers.config_keys 残留 {key}')
+
+    def test_vue_actuator_api_and_view_exclude_cert_keys(self):
+        api_ts = self._repo_file('WHartTest_Vue/src/features/ui-automation/api/index.ts')
+        vue = self._repo_file(
+            'WHartTest_Vue/src/features/ui-automation/views/ActuatorList.vue'
+        )
+        for key in NODE_LEVEL_CERT_KEYS:
+            self.assertNotIn(key, api_ts, msg=f'Vue api 类型残留 {key}')
+            self.assertNotIn(key, vue, msg=f'ActuatorList.vue 残留 {key}')
+
+    def test_websocket_actuator_info_excludes_cert_keys(self):
+        import inspect
+
+        from websocket_client import WebSocketClient
+
+        source = inspect.getsource(WebSocketClient._send_actuator_info)
+        for key in NODE_LEVEL_CERT_KEYS + ('client_cert_passphrase', 'ignore_https_errors'):
+            self.assertNotIn(f"'{key}':", source, msg=f'执行器上报残留 {key}')
+
+
+class LegacyConfigDeprecationTest(unittest.TestCase):
+    """config.toml / 环境变量中的旧证书键只提示迁移，绝不生效。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_config_has_no_cert_attributes(self):
+        config = Config()
+        for attr in NODE_LEVEL_CERT_KEYS + ('ignore_https_errors', 'config_dir'):
+            self.assertFalse(hasattr(config, attr), msg=f'Config 仍持有 {attr}')
+
+    def test_toml_legacy_keys_only_warn(self):
+        path = self.tmp / 'config.toml'
+        path.write_text(
+            '[browser]\n'
+            'browser_type = "chromium"\n'
+            'client_cert_enabled = true\n'
+            'client_cert_pfx_path = "./certs/client.pfx"\n'
+            'client_cert_passphrase = "pw"\n'
+            'ignore_https_errors = true\n',
+            encoding='utf-8',
+        )
+        config = Config()
         with self.assertLogs(level='WARNING') as captured:
-            config.resolve_client_cert_paths()
-        self.assertTrue(any('不存在' in r.getMessage() for r in captured.records))
+            config.load_from_toml(str(path))
+
+        self.assertTrue(
+            any('已不再生效' in r.getMessage() for r in captured.records),
+            msg='应提示迁移到 Web 端',
+        )
+        # 正常键仍生效（证明只是忽略了证书键，不影响其余解析）
+        self.assertEqual(config.browser_type, 'chromium')
+        for attr in NODE_LEVEL_CERT_KEYS + ('ignore_https_errors',):
+            self.assertFalse(hasattr(config, attr), msg=f'{attr} 不应被写入')
+
+    def test_env_legacy_vars_ignored_and_passphrase_popped(self):
+        env = {
+            'WHARTTEST_ACTUATOR_CLIENT_CERT_ENABLED': 'true',
+            'WHARTTEST_ACTUATOR_CLIENT_CERT_PFX_PATH': '/app/certs/client.pfx',
+            'WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE': SECRET_PASSPHRASE,
+            'WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS': 'true',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = Config()
+            with self.assertLogs(level='WARNING') as captured:
+                config.load_from_env()
+
+            self.assertTrue(
+                any('已不再生效' in r.getMessage() for r in captured.records)
+            )
+            # 口令即使已废弃也要从环境中移除，避免泄漏给子进程
+            self.assertNotIn('WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE', os.environ)
+
+        for attr in NODE_LEVEL_CERT_KEYS + ('ignore_https_errors',):
+            self.assertFalse(hasattr(config, attr), msg=f'{attr} 不应被写入')
 
 
-class ConfigEnvTest(unittest.TestCase):
-    ENV = {
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_ENABLED': 'true',
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_PFX_PATH': '  /app/certs/client.pfx  ',
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE': SECRET_PASSPHRASE,
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_CERT_PATH': '/app/certs/client.crt',
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_KEY_PATH': '/app/certs/client.key',
-        'WHARTTEST_ACTUATOR_CLIENT_CERT_ORIGINS': 'https://a.example.com',
-    }
-
-    @patch.dict(os.environ, ENV, clear=True)
-    def test_string_and_bool_env_are_applied(self):
-        config = Config()
-        config.load_from_env()
-
-        self.assertTrue(config.client_cert_enabled)
-        self.assertEqual(config.client_cert_pfx_path, '/app/certs/client.pfx')
-        self.assertEqual(config.client_cert_cert_path, '/app/certs/client.crt')
-        self.assertEqual(config.client_cert_key_path, '/app/certs/client.key')
-        self.assertEqual(config.client_cert_origins, 'https://a.example.com')
-
-    @patch.dict(os.environ, ENV, clear=True)
-    def test_passphrase_is_removed_from_environment(self):
-        config = Config()
-        config.load_from_env()
-
-        self.assertEqual(config.client_cert_passphrase, SECRET_PASSPHRASE)
-        # 读完即从环境中移除，避免泄漏给后续启动的子进程
-        self.assertNotIn('WHARTTEST_ACTUATOR_CLIENT_CERT_PASSPHRASE', os.environ)
-
-    @patch.dict(
-        os.environ,
-        {'WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS': 'auto'},
-        clear=True,
-    )
-    def test_ignore_https_errors_auto_is_none(self):
-        config = Config()
-        config.ignore_https_errors = 'sentinel-set-by-test'
-        config.load_from_env()
-        self.assertIsNone(config.ignore_https_errors)
-
-    @patch.dict(os.environ, {'WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS': 'true'}, clear=True)
-    def test_ignore_https_errors_true(self):
-        config = Config()
-        config.load_from_env()
-        self.assertIs(config.ignore_https_errors, True)
-
-    @patch.dict(os.environ, {'WHARTTEST_ACTUATOR_IGNORE_HTTPS_ERRORS': 'false'}, clear=True)
-    def test_ignore_https_errors_false(self):
-        config = Config()
-        config.load_from_env()
-        self.assertIs(config.ignore_https_errors, False)
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_unset_env_leaves_attribute_untouched(self):
-        config = Config()
-        config.load_from_env()
-        self.assertIsNone(config.ignore_https_errors)
-
-
-# ---------------------------------------------------------------------------
-# 5. consumer 平台下发通道
-# ---------------------------------------------------------------------------
-
-class ConsumerConfigChannelTest(unittest.TestCase):
+class ConsumerRedactionTest(unittest.TestCase):
     def setUp(self):
         from consumer import TaskConsumer
 
         self.TaskConsumer = TaskConsumer
 
-    def test_config_field_map_covers_cert_fields(self):
-        mapping = self.TaskConsumer._CONFIG_FIELD_MAP
-        for key in (
-            'client_cert_enabled',
-            'client_cert_pfx_path',
-            'client_cert_cert_path',
-            'client_cert_key_path',
-            'client_cert_origins',
-        ):
-            self.assertIn(key, mapping)
-            self.assertEqual(mapping[key], key)
-
     def test_config_field_map_excludes_passphrase(self):
-        """口令绝不能进入平台下发通道（下发+持久化都走这张表）。"""
         mapping = self.TaskConsumer._CONFIG_FIELD_MAP
-        self.assertNotIn('client_cert_passphrase', mapping)
-        self.assertNotIn('client_cert_passphrase', set(mapping.values()))
+        for key, value in mapping.items():
+            self.assertNotIn('passphrase', key)
+            self.assertNotIn('passphrase', value)
 
     def test_redact_masks_sensitive_keys(self):
         redacted = self.TaskConsumer._redact(
@@ -883,8 +1120,8 @@ class ConsumerConfigChannelTest(unittest.TestCase):
         self.assertIsNone(self.TaskConsumer._redact(None))
 
 
-class PersistConfigRoundTripTest(unittest.TestCase):
-    """平台下发配置写回 config.toml 时，不能冲掉本机配置的证书口令。"""
+class PersistConfigNoCertKeysTest(unittest.TestCase):
+    """平台下发配置写回 config.toml 时，绝不能再写入节点级证书键。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -901,15 +1138,13 @@ class PersistConfigRoundTripTest(unittest.TestCase):
         consumer.config_path = str(self.path)
         return consumer
 
-    def test_cert_keys_written_and_passphrase_preserved(self):
+    def test_cert_keys_are_not_persisted(self):
         import tomllib
 
-        # 本机已有配置（含口令）
         self.path.write_text(
             f'[browser]\nclient_cert_passphrase = "{SECRET_PASSPHRASE}"\n',
             encoding='utf-8',
         )
-
         consumer = self._make_consumer()
         consumer._persist_config(
             {
@@ -923,27 +1158,12 @@ class PersistConfigRoundTripTest(unittest.TestCase):
             data = tomllib.load(fh)
 
         browser = data['browser']
-        self.assertTrue(browser['client_cert_enabled'])
-        self.assertEqual(browser['client_cert_pfx_path'], './certs/client.pfx')
-        self.assertEqual(browser['client_cert_origins'], 'https://a.example.com')
-        # 关键：口令未被平台下发内容覆盖
+        for key in NODE_LEVEL_CERT_KEYS:
+            self.assertNotIn(key, browser, msg=f'{key} 不应被持久化')
+        # 本机已有的旧键也不会被铲除（不主动破坏用户文件），但绝不会被平台值覆盖
         self.assertEqual(browser['client_cert_passphrase'], SECRET_PASSPHRASE)
 
-    def test_none_values_are_skipped(self):
-        import tomllib
-
-        consumer = self._make_consumer()
-        consumer._persist_config(
-            {'client_cert_enabled': None, 'client_cert_pfx_path': '/app/certs/x.pfx'}
-        )
-
-        with open(self.path, 'rb') as fh:
-            data = tomllib.load(fh)
-
-        self.assertNotIn('client_cert_enabled', data['browser'])
-        self.assertEqual(data['browser']['client_cert_pfx_path'], '/app/certs/x.pfx')
-
-    def test_other_sections_survive(self):
+    def test_normal_fields_round_trip(self):
         import tomllib
 
         self.path.write_text(
@@ -951,100 +1171,31 @@ class PersistConfigRoundTripTest(unittest.TestCase):
             encoding='utf-8',
         )
         consumer = self._make_consumer()
-        consumer._persist_config({'client_cert_enabled': True})
+        consumer._persist_config({'browser_type': 'firefox', 'retry_count': 5})
 
         with open(self.path, 'rb') as fh:
             data = tomllib.load(fh)
 
         self.assertEqual(data['server']['ws_url'], 'ws://backend:8000/ws/ui/actuator/')
+        self.assertEqual(data['browser']['browser_type'], 'firefox')
+        self.assertEqual(data['execution']['retry_count'], 5)
+
+    def test_none_values_are_skipped(self):
+        import tomllib
+
+        consumer = self._make_consumer()
+        consumer._persist_config({'browser_type': None, 'retry_count': 2})
+
+        with open(self.path, 'rb') as fh:
+            data = tomllib.load(fh)
+
+        self.assertNotIn('browser_type', data['browser'])
+        self.assertEqual(data['execution']['retry_count'], 2)
 
 
-class ActuatorInfoReportingTest(unittest.TestCase):
-    """执行器上报必须包含证书路径字段，否则平台编辑弹窗会提交空串把它清掉。"""
-
-    def test_actuator_info_includes_cert_paths(self):
-        import inspect
-
-        from websocket_client import WebSocketClient
-
-        source = inspect.getsource(WebSocketClient._send_actuator_info)
-        for key in (
-            'client_cert_enabled',
-            'client_cert_pfx_path',
-            'client_cert_cert_path',
-            'client_cert_key_path',
-            'client_cert_origins',
-        ):
-            self.assertIn(f"'{key}':", source, msg=f'上报字段缺少 {key}')
-        # 口令绝不上报（注释里提及是允许的，所以断言的是「不是 dict 键」）
-        self.assertNotIn("'client_cert_passphrase':", source)
-
-
-class DjangoWhitelistConsistencyTest(unittest.TestCase):
-    """证书字段必须同时存在于 6 个位置，漏掉任何一处都会被静默丢弃。
-
-    这是本功能最容易出错的地方（已实际踩过一次：Django consumers 的 config_keys 白名单）。
-    这里对源码做静态比对 —— 比拉起 Django 环境轻得多，且不需要数据库。
-    """
-
-    CERT_KEYS = (
-        'client_cert_enabled',
-        'client_cert_pfx_path',
-        'client_cert_cert_path',
-        'client_cert_key_path',
-        'client_cert_origins',
-    )
-
-    def _read(self, relative: str) -> str:
-        repo_root = Path(__file__).parent.parent
-        path = repo_root / relative
-        self.assertTrue(path.exists(), msg=f'找不到文件: {path}')
-        return path.read_text(encoding='utf-8')
-
-    def test_executor_side_field_map(self):
-        from consumer import TaskConsumer
-
-        for key in self.CERT_KEYS:
-            self.assertIn(key, TaskConsumer._CONFIG_FIELD_MAP, msg=f'consumer 缺少 {key}')
-
-    def test_django_views_whitelist_and_list_actuators(self):
-        views = self._read('WHartTest_Django/ui_automation/views.py')
-        for key in self.CERT_KEYS:
-            self.assertIn(key, views, msg=f'Django views 缺少 {key}')
-        # list_actuators 必须回填，否则前端以空串预填并覆盖执行器上的真实值
-        for key in self.CERT_KEYS:
-            self.assertIn(f"'{key}'", views, msg=f'Django views 未回填 {key}')
-
-    def test_django_consumers_config_keys(self):
-        """上报字段白名单：缺了它，执行器上报的证书路径不会被存储。"""
-        consumers = self._read('WHartTest_Django/ui_automation/consumers.py')
-        start = consumers.index('config_keys = (')
-        end = consumers.index(')', start)
-        block = consumers[start:end]
-        for key in self.CERT_KEYS:
-            self.assertIn(key, block, msg=f'Django consumers.config_keys 缺少 {key}')
-
-    def test_vue_api_types_and_form(self):
-        api_ts = self._read('WHartTest_Vue/src/features/ui-automation/api/index.ts')
-        vue = self._read(
-            'WHartTest_Vue/src/features/ui-automation/views/ActuatorList.vue'
-        )
-        for key in self.CERT_KEYS:
-            self.assertIn(key, api_ts, msg=f'Vue api 类型缺少 {key}')
-            self.assertIn(key, vue, msg=f'ActuatorList.vue 缺少 {key}')
-
-    def test_django_whitelist_excludes_passphrase(self):
-        views = self._read('WHartTest_Django/ui_automation/views.py')
-        start = views.index('_ACTUATOR_CONFIG_FIELDS = frozenset({')
-        end = views.index('})', start)
-        self.assertNotIn('client_cert_passphrase', views[start:end])
-
-    def test_django_report_whitelist_excludes_passphrase(self):
-        consumers = self._read('WHartTest_Django/ui_automation/consumers.py')
-        start = consumers.index('config_keys = (')
-        end = consumers.index(')', start)
-        self.assertNotIn('client_cert_passphrase', consumers[start:end])
-
+# ---------------------------------------------------------------------------
+# 7. 执行器 local_merge 兜底路径的 ignore_https_errors 三态
+# ---------------------------------------------------------------------------
 
 class IgnoreHttpsErrorsRuntimeTest(unittest.TestCase):
     """执行器 local_merge 兜底路径的 ignore_https_errors 三态。
@@ -1091,6 +1242,10 @@ class IgnoreHttpsErrorsRuntimeTest(unittest.TestCase):
         self.assertNotIn('ignore_https_errors', normalize_run_options({'ignore_https_errors': None}))
 
 
+# ---------------------------------------------------------------------------
+# 8. consumer 任务级证书通道（平台下发 → 下载 → 注入）
+# ---------------------------------------------------------------------------
+
 class ConsumerTaskOriginWiringTest(unittest.TestCase):
     """三个执行入口必须显式固定任务 origin 并让三态开关贯通（防回归）。"""
 
@@ -1121,6 +1276,21 @@ class ConsumerTaskOriginWiringTest(unittest.TestCase):
         src = self._consumer()
         self.assertIn('await self._resolve_task_client_cert(args)', src)
         self.assertIn('opts["client_cert"] = task_cert', src)
+
+    def test_task_origins_extracted_from_payload(self):
+        from consumer import TaskConsumer
+
+        args = {
+            'client_cert': {
+                'origins': ['https://a.example.com', 'http://insecure.example.com'],
+            }
+        }
+        self.assertEqual(
+            TaskConsumer._client_cert_task_origins(args),
+            ['https://a.example.com', 'http://insecure.example.com'],
+        )
+        self.assertEqual(TaskConsumer._client_cert_task_origins(None), [])
+        self.assertEqual(TaskConsumer._client_cert_task_origins({}), [])
 
 
 if __name__ == '__main__':

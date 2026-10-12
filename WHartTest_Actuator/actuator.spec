@@ -132,6 +132,7 @@ a = Analysis(
         'consumer',
         'executor',
         'client_cert',
+        'cryptography',  # 客户端证书预校验（executor 内延迟导入，需显式声明）
         'models',
         'data_processor',
         'gui',

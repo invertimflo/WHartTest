@@ -28,9 +28,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY . /app
 
-# /app/certs 用于挂载 HTTPS 客户端证书（只读挂载，例如：
-#   -v ./certs:/app/certs:ro -e WHARTTEST_ACTUATOR_CLIENT_CERT_PFX_PATH=/app/certs/client.pfx
-# 证书不会被打进镜像，需由使用者自行提供。
-RUN mkdir -p /app/data/browser /app/data/screenshots /app/data/traces /app/certs
+# 运行时目录（浏览器用户数据 / 截图 / trace）。
+# HTTPS 客户端证书不再需要本机挂载：由平台按 UI 自动化环境配置随任务下发，
+# 执行器下载到本地缓存后注入 Playwright。
+RUN mkdir -p /app/data/browser /app/data/screenshots /app/data/traces
 
 CMD ["python", "main.py"]

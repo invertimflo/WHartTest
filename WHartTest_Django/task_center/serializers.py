@@ -7,6 +7,7 @@ class ScheduledTaskSerializer(serializers.ModelSerializer):
     schedule_display = serializers.SerializerMethodField()
     creator_name = serializers.SerializerMethodField()
     test_suite_name = serializers.SerializerMethodField()
+    env_config_name = serializers.SerializerMethodField()
     ui_testcase_ids = serializers.PrimaryKeyRelatedField(
         source='ui_testcases', many=True,
         queryset=UiTestCase.objects.all(), required=False
@@ -22,12 +23,12 @@ class ScheduledTaskSerializer(serializers.ModelSerializer):
             'status', 'last_run_at', 'creator', 'creator_name',
             'schedule_display', 'created_at', 'updated_at',
             'test_suite', 'test_suite_name', 'ui_testcase_ids',
-            'actuator_id',
+            'actuator_id', 'env_config', 'env_config_name',
         ]
         read_only_fields = [
             'project', 'status', 'last_run_at', 'creator', 'creator_name',
             'schedule_display', 'created_at', 'updated_at',
-            'test_suite_name',
+            'test_suite_name', 'env_config_name',
         ]
 
     def get_schedule_display(self, obj):
@@ -43,6 +44,11 @@ class ScheduledTaskSerializer(serializers.ModelSerializer):
             return obj.test_suite.name
         return None
 
+    def get_env_config_name(self, obj):
+        if obj.env_config:
+            return obj.env_config.name
+        return None
+
     def validate_name(self, value):
         if len(value) > 50:
             raise serializers.ValidationError('任务名称最大长度为50字符')
@@ -56,6 +62,17 @@ class ScheduledTaskSerializer(serializers.ModelSerializer):
         if module == ScheduledTask.TaskModule.TEST_SUITE:
             if not attrs.get('test_suite') and not getattr(self.instance, 'test_suite', None):
                 raise serializers.ValidationError({'test_suite': '测试套件模块必须关联一个测试套件'})
+
+        # UI 环境必须属于当前项目（project 由视图按 URL 注入，为只读字段）
+        env_config = attrs.get('env_config', getattr(self.instance, 'env_config', None))
+        project_id = getattr(self.instance, 'project_id', None)
+        if project_id is None:
+            view = self.context.get('view')
+            if view is not None:
+                project_id = view.kwargs.get('project_pk')
+        if env_config is not None and project_id is not None:
+            if str(env_config.project_id) != str(project_id):
+                raise serializers.ValidationError({'env_config': 'UI 环境必须属于当前项目'})
 
         if schedule_type == ScheduledTask.ScheduleType.ONCE:
             if not attrs.get('once_datetime') and not getattr(self.instance, 'once_datetime', None):

@@ -81,6 +81,20 @@
               </a-option>
             </a-select>
           </a-form-item>
+          <a-form-item :label="modalText.uiEnvironment" field="env_config">
+            <a-select
+              v-model="form.env_config"
+              :placeholder="modalText.selectUiEnvironment"
+              :loading="loadingEnvConfigs"
+              allow-search
+              allow-clear
+              @popup-visible-change="(v: boolean) => v && loadEnvConfigs()"
+            >
+              <a-option v-for="env in envConfigs" :key="env.id" :value="env.id">
+                {{ env.name }}
+              </a-option>
+            </a-select>
+          </a-form-item>
           <a-form-item :label="modalText.scheduleType" field="schedule_type" :rules="[{ required: true, message: modalText.selectValue }]">
             <a-select v-model="form.schedule_type" :placeholder="modalText.selectValue">
               <a-option v-for="option in scheduleOptions" :key="option.value" :value="option.value">
@@ -162,7 +176,7 @@ import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { getCurrentServerLanguage } from '@/utils/installLocaleAdapters';
 import { createTask, updateTask, type TaskFormData, type ScheduledTask } from '../services/taskService';
-import { actuatorApi, type ActuatorInfo } from '@/features/ui-automation/api';
+import { actuatorApi, envConfigApi, type ActuatorInfo } from '@/features/ui-automation/api';
 import UiTestCaseSelectModal from './UiTestCaseSelectModal.vue';
 
 const props = defineProps<{
@@ -202,6 +216,8 @@ const modalText = computed(() => (
         actuator: 'Actuator',
         selectActuator: 'Select actuator',
         selectActuatorRequired: 'Select an actuator',
+        uiEnvironment: 'UI Environment',
+        selectUiEnvironment: 'Optional: bind a UI environment (base URL / login state / client certificate)',
         scheduleType: 'Schedule',
         once: 'Once',
         daily: 'Daily',
@@ -252,6 +268,8 @@ const modalText = computed(() => (
         actuator: '执行器',
         selectActuator: '请选择执行器',
         selectActuatorRequired: '请选择执行器',
+        uiEnvironment: 'UI 环境',
+        selectUiEnvironment: '可选：绑定环境以使用其基础 URL / 登录态 / 客户端证书',
         scheduleType: '调度策略',
         once: '仅一次',
         daily: '每天',
@@ -289,6 +307,8 @@ const loadingSuites = ref(false);
 const loadingActuators = ref(false);
 const testSuites = ref<{ id: number; name: string }[]>([]);
 const actuators = ref<ActuatorInfo[]>([]);
+const loadingEnvConfigs = ref(false);
+const envConfigs = ref<{ id: number; name: string }[]>([]);
 const caseSelectModal = ref<InstanceType<typeof UiTestCaseSelectModal>>();
 
 const scheduleOptions = computed(() => [
@@ -325,6 +345,7 @@ const defaultForm = (): TaskFormData => ({
   test_suite: null,
   ui_testcase_ids: [],
   actuator_id: '',
+  env_config: null,
 });
 
 const form = reactive<TaskFormData>(defaultForm());
@@ -381,10 +402,25 @@ const loadActuators = async () => {
   }
 };
 
+const loadEnvConfigs = async () => {
+  loadingEnvConfigs.value = true;
+  try {
+    const res: any = await envConfigApi.list({ project: props.projectId });
+    const payload = res?.data?.data ?? res?.data;
+    const items = Array.isArray(payload) ? payload : (payload?.results || payload?.items || []);
+    envConfigs.value = items.map((env: any) => ({ id: env.id, name: env.name }));
+  } catch {
+    envConfigs.value = [];
+  } finally {
+    loadingEnvConfigs.value = false;
+  }
+};
+
 const onModuleChange = () => {
   form.test_suite = null;
   form.ui_testcase_ids = [];
   form.actuator_id = '';
+  form.env_config = null;
 };
 
 const resetForm = () => {
@@ -422,6 +458,7 @@ const open = (task?: ScheduledTask) => {
       test_suite: task.test_suite,
       ui_testcase_ids: task.ui_testcase_ids || [],
       actuator_id: task.actuator_id || '',
+      env_config: task.env_config ?? null,
     });
   } else {
     isEditing.value = false;

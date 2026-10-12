@@ -24,6 +24,15 @@ import client_cert
 
 logger = logging.getLogger('actuator')
 
+# 环境 base_url 首跳的导航参数：与 Web 录制器保持一致
+# （ui_automation/recorder/recorder_server.js 的
+#   page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })）。
+#
+# 刻意不用 "networkidle"：部分站点（如 https://cn.bing.com/）存在持续网络活动，
+# 永远等不到 networkidle；且此前未显式传 timeout，会落到页面默认超时
+# （= action_timeout，config.toml 默认仅 5s），于是必然 5s 超时报错。
+_ENV_BASE_URL_NAV = {"wait_until": "domcontentloaded", "timeout": 30000}
+
 DEFAULT_STEALTH_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -141,14 +150,6 @@ class PlaywrightExecutor:
         trace_sources: bool = False,
         stealth_enabled: bool = True,
         stealth_user_agent: Optional[str] = None,
-        client_cert_enabled: bool = False,
-        client_cert_pfx_path: Optional[str] = None,
-        client_cert_passphrase: Optional[str] = None,
-        client_cert_cert_path: Optional[str] = None,
-        client_cert_key_path: Optional[str] = None,
-        client_cert_origins: Optional[str] = None,
-        client_cert_config_dir: Optional[str] = None,
-        ignore_https_errors: Optional[bool] = None,
     ):
         self.browser_type = browser_type
         self.headless = headless
@@ -174,19 +175,19 @@ class PlaywrightExecutor:
         self.stealth_enabled = stealth_enabled
         self.stealth_user_agent = stealth_user_agent
 
-        # HTTPS 客户端证书（节点级配置，详见 client_cert.py）
-        # ignore_https_errors 三态：None=auto / True / False
-        self.ignore_https_errors: Optional[bool] = ignore_https_errors
-        self._client_cert_enabled = bool(client_cert_enabled)
-        self._client_cert_pfx_path = client_cert_pfx_path or None
-        self._client_cert_passphrase = client_cert_passphrase or None
-        self._client_cert_cert_path = client_cert_cert_path or None
-        self._client_cert_key_path = client_cert_key_path or None
-        self._client_cert_origins = client_cert_origins or None
-        # 相对证书路径的基准目录（通常为 config.toml 所在目录）
-        self._client_cert_config_dir: Optional[Path] = (
-            Path(client_cert_config_dir) if client_cert_config_dir else None
-        )
+        # HTTPS 客户端证书（**仅任务级**：由平台按「UI自动化环境配置」随任务下发，
+        # 执行器下载证书文件到本地缓存后在此注入，详见 client_cert.py）。
+        # 执行器不再提供节点级 / config.toml 证书配置 —— 与 Web 端「客户端证书」
+        # 统一管理重复，已移除；此处状态在每个任务开始时由 apply_runtime_options 覆盖，
+        # 任务结束由 restore_runtime_options 复位，避免串到下一个任务。
+        # ignore_https_errors 三态：None=auto（跟随证书推导）/ True / False
+        self.ignore_https_errors: Optional[bool] = None
+        self._client_cert_enabled = False
+        self._client_cert_pfx_path: Optional[str] = None
+        self._client_cert_passphrase: Optional[str] = None
+        self._client_cert_cert_path: Optional[str] = None
+        self._client_cert_key_path: Optional[str] = None
+        self._client_cert_origins = None
         # 本次任务推导出的 origin（由 set_task_origins 覆盖写入）
         self._task_cert_origins: list[str] = []
         # 平台随证书下发的 origin（环境 base_url 等），由 prepare_task_origins 写入。
@@ -199,6 +200,8 @@ class PlaywrightExecutor:
         self._client_cert_resolved: Optional[dict] = None
         # 已打印过 info 的证书指纹，避免每次建上下文都刷日志
         self._client_cert_logged: Optional[tuple] = None
+        # 本次任务的证书降级原因（预校验失败 / 注入失败），供结果消息提示，任务开始时清空
+        self._last_cert_failure: Optional[str] = None
         
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
@@ -228,6 +231,7 @@ class PlaywrightExecutor:
 
         Returns the previous browser-related state for restore.
         """
+        self._last_cert_failure = None
         previous = {
             "browser_type": self.browser_type,
             "headless": self.headless,
@@ -286,7 +290,7 @@ class PlaywrightExecutor:
             # 任务级认证配置原样透传；None 表示无（恢复任务前状态由 restore 负责）
             self._auth_config = auth if isinstance(auth, dict) else None
 
-        # 忽略证书校验三态：None 保持 auto（沿用节点默认/证书推导），True/False 强制覆盖
+        # 忽略证书校验三态：None 保持 auto（跟随 stealth 与证书推导），True/False 强制覆盖
         if runtime.get("ignore_https_errors") is not None:
             self.ignore_https_errors = bool(runtime["ignore_https_errors"])
 
@@ -317,7 +321,7 @@ class PlaywrightExecutor:
         self._viewport_explicit = previous.get("_viewport_explicit", False)
         self._auth_config = previous.get("_auth_config")
 
-        # 还原节点级 HTTPS 配置，避免任务级证书"串"到下一个任务
+        # 复位任务级 HTTPS 证书状态，避免任务级证书"串"到下一个任务
         self.ignore_https_errors = previous.get("ignore_https_errors")
         self._client_cert_enabled = previous.get("_client_cert_enabled", False)
         self._client_cert_pfx_path = previous.get("_client_cert_pfx_path")
@@ -351,17 +355,16 @@ class PlaywrightExecutor:
         cert_path: Optional[str] = None,
         key_path: Optional[str] = None,
         origins: Optional[str] = None,
-        config_dir: Optional[str] = None,
         reset_material: bool = False,
     ) -> None:
-        """配置或热更新客户端证书。
+        """配置本次任务的客户端证书（材料由平台随任务下发）。
 
         仅更新显式传入（非 None）的字段，因此可安全地用于「平台只下发部分字段」的场景。
         ``passphrase`` 属敏感信息，只保存在内存中，不写入日志。
 
-        ``reset_material=True``：先清空全部证书材料再应用。任务级（环境）证书必须走这条
-        路径 —— 否则节点 config.toml 里遗留的 pfx 路径会与任务下发的 PEM 同时存在，
-        而 build_client_certificates() 的「pfx 优先」规则会把任务证书整个丢掉。
+        ``reset_material=True``：先清空全部证书材料再应用。任务级（环境）证书走这条
+        路径，保证上一任务的证书材料不会与本任务的材料混用（PEM 与 PKCS#12 的
+        「pfx 优先」规则会互相吞掉）。
         """
         if reset_material:
             self._client_cert_pfx_path = None
@@ -382,8 +385,6 @@ class PlaywrightExecutor:
             self._client_cert_key_path = key_path or None
         if origins is not None:
             self._client_cert_origins = origins or None
-        if config_dir is not None:
-            self._client_cert_config_dir = Path(config_dir) if config_dir else None
 
         # 证书材料可能有变化，作废缓存与告警去重记录，让下一次建上下文重新评估
         self._client_cert_resolved = None
@@ -393,7 +394,7 @@ class PlaywrightExecutor:
         """从任务配置推导出需要匹配的 https origin 集合。
 
         来源：``env_config['base_url']``、``page_url``（用例级与页面步骤级），
-        再追加配置里的额外 origin 列表（``client_cert_origins``）。
+        再追加任务级额外 origin 列表（``_client_cert_origins``，由平台随证书下发）。
         非 https 与无法解析的项会被丢弃 —— Playwright 不支持通配，只能精确匹配。
         """
         candidates: list[str] = []
@@ -462,7 +463,7 @@ class PlaywrightExecutor:
 
         每个执行入口在任务开始时调用一次（覆盖式写入）。origin 来源：
           - 任务配置里的 env_config.base_url / page_url / 各组页面步骤 URL
-          - 节点级 client_cert_origins（由 _task_origins 自动并入）
+          - 任务级额外 origin（由平台随证书下发，见 _client_cert_origins）
           - extra_origins：平台随证书下发的 origin（环境 base_url），会被记住并在
             后续 refresh_task_origins() 中持续生效
         Playwright 的 client_certificates 要求 origin 精确匹配且不支持通配，
@@ -486,15 +487,18 @@ class PlaywrightExecutor:
         return self._task_cert_origins
 
     def _resolved_cert_files(self) -> dict:
-        """解析证书文件绝对路径（结果缓存，configure_client_cert 时作废）。"""
+        """解析证书文件绝对路径（结果缓存，configure_client_cert 时作废）。
+
+        任务下发的证书文件由执行器下载到本地缓存，均为绝对路径，因此不再需要
+        config.toml 所在目录作为相对路径基准。
+        """
         if self._client_cert_resolved is not None:
             return self._client_cert_resolved
 
-        base_dir = self._client_cert_config_dir
         self._client_cert_resolved = {
-            'pfx': client_cert.resolve_cert_path(self._client_cert_pfx_path, base_dir),
-            'cert': client_cert.resolve_cert_path(self._client_cert_cert_path, base_dir),
-            'key': client_cert.resolve_cert_path(self._client_cert_key_path, base_dir),
+            'pfx': client_cert.resolve_cert_path(self._client_cert_pfx_path),
+            'cert': client_cert.resolve_cert_path(self._client_cert_cert_path),
+            'key': client_cert.resolve_cert_path(self._client_cert_key_path),
         }
         return self._client_cert_resolved
 
@@ -504,6 +508,59 @@ class PlaywrightExecutor:
             return
         self._cert_warned.add(key)
         logger.warning(message)
+
+    def _precheck_cert_material(self, pfx, cert, key, passphrase) -> Optional[str]:
+        """用 ``cryptography`` 预校验证书材料能否加载；失败返回中文原因，通过/跳过返回 ``None``。
+
+        Playwright 只在 ``new_context()`` 时才真正读取证书文件，且对「口令错误 / 格式不受
+        支持」只会抛出底层错误（甚至只表现为握手失败、白屏），排查成本很高。这里在真正建
+        上下文前先做一次「可加载性」预校验，把问题变成一条明确日志。
+
+        ``cryptography`` 是**可选依赖**（执行器 requirements 未强制）；运行环境没有它时
+        跳过预校验（返回 ``None``），由 ``_init_browser_context`` 的失败降级兜底。
+        文件不存在时不在此处报错（交给 validate_cert_files 的存在性告警）。
+        """
+        if pfx is None and (cert is None or key is None):
+            return None
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.serialization import pkcs12
+        except Exception:  # noqa: BLE001 - cryptography 缺失即可选跳过
+            return None
+
+        try:
+            if pfx is not None:
+                if not pfx.exists():
+                    return None
+                with open(pfx, 'rb') as fh:
+                    data = fh.read()
+                password = str(passphrase).encode('utf-8') if passphrase else None
+                priv, crt, _ = pkcs12.load_key_and_certificates(data, password)
+                if priv is None or crt is None:
+                    return 'PKCS#12 文件中缺少私钥或证书'
+                return None
+
+            if cert is None or key is None or not key.exists():
+                return None
+            with open(key, 'rb') as fh:
+                key_bytes = fh.read()
+            password = str(passphrase).encode('utf-8') if passphrase else None
+            serialization.load_pem_private_key(key_bytes, password=password)
+            return None
+        except Exception as exc:  # noqa: BLE001 - 口令错误 / 格式损坏统一降级
+            return f'材料无法加载（口令是否正确？或格式不受 Playwright 支持）：{exc}'
+
+    @staticmethod
+    def _is_cert_error(exc: Exception) -> bool:
+        """判断建上下文异常是否与客户端证书相关（用于降级重试判定）。"""
+        text = str(exc).lower()
+        return any(
+            keyword in text
+            for keyword in (
+                'client_certificate', 'client certificate', 'pkcs12', 'pfx',
+                'passphrase', 'certificate', 'ssl', 'tls',
+            )
+        )
 
     def _build_client_certificates(self) -> list[dict]:
         """构造 Playwright ``client_certificates`` 参数；不满足条件时返回 ``[]``。
@@ -521,8 +578,8 @@ class PlaywrightExecutor:
         if pfx is None and (cert is None or key is None):
             self._warn_cert_once(
                 'no-material',
-                "客户端证书已启用但未配置完整的证书文件"
-                "（需 client_cert_pfx_path，或 client_cert_cert_path + client_cert_key_path），"
+                "客户端证书已启用但未拿到完整的证书材料（需 pfx，或 cert + key）——"
+                "通常是对应 UI 环境绑定的客户端证书未随任务下发或文件下载失败，"
                 "本次执行不启用客户端证书",
             )
             return []
@@ -530,12 +587,25 @@ class PlaywrightExecutor:
         for warning in client_cert.validate_cert_files(pfx_path=pfx, cert_path=cert, key_path=key):
             self._warn_cert_once(f'file:{warning}', f"客户端证书配置告警：{warning}")
 
+        # 可加载性预校验：把「口令错误 / 格式不受支持」在真正建上下文前变成明确日志
+        precheck_reason = self._precheck_cert_material(
+            pfx, cert, key, self._client_cert_passphrase,
+        )
+        if precheck_reason:
+            self._warn_cert_once(
+                'material-invalid',
+                f"客户端证书不可用（{pfx or cert}）：{precheck_reason}"
+                "；本次执行不启用客户端证书",
+            )
+            self._last_cert_failure = f"客户端证书不可用：{precheck_reason}"
+            return []
+
         origins = self._task_cert_origins or client_cert.parse_origins(self._client_cert_origins)
         if not origins:
             self._warn_cert_once(
                 'no-origin',
-                "客户端证书已启用但未能推导出 https origin（任务的 base_url / page_url 均非 https，"
-                "且未配置 client_cert_origins）；Playwright 要求 origin 精确匹配且不支持通配，"
+                "客户端证书已启用但未能推导出 https origin（环境的 base_url / 页面地址均非 https，"
+                "且未随证书下发 origin）；Playwright 要求 origin 精确匹配且不支持通配，"
                 "本次执行不启用客户端证书",
             )
             return []
@@ -808,10 +878,33 @@ class PlaywrightExecutor:
         return True
 
     async def _init_browser_context(self) -> None:
-        """按当前 _auth_config 创建 context/page（init_browser 与 ensure_auth_context 共用）。"""
+        """按当前 _auth_config 创建 context/page（init_browser 与 ensure_auth_context 共用）。
+
+        若因客户端证书导致建上下文失败（口令错误 / 格式不受支持 / 证书文件损坏），
+        降级为「不带 client_certificates」再试一次，避免整个用例直接失败：
+        证书是可选特性，失败应给出明确提示并继续执行其余部分。
+        """
         browser_launcher = getattr(self._playwright, self.browser_type)
         launch_options = self._build_browser_launch_options()
         context_options = self._build_browser_context_options()
+        try:
+            await self._create_context_page(browser_launcher, launch_options, context_options)
+        except Exception as exc:
+            if 'client_certificates' not in context_options or not self._is_cert_error(exc):
+                raise
+            reason = (
+                f"客户端证书注入失败（{exc}），本次执行已降级为不启用客户端证书"
+            )
+            logger.warning(reason)
+            self._last_cert_failure = reason
+            fallback_options = dict(context_options)
+            fallback_options.pop('client_certificates', None)
+            await self._create_context_page(browser_launcher, launch_options, fallback_options)
+        self._page.set_default_timeout(self.action_timeout)
+        self._log_auth_injection()
+
+    async def _create_context_page(self, browser_launcher, launch_options: dict, context_options: dict) -> None:
+        """按 persistent / 非 persistent 创建 context 与 page（不含超时与登录态日志）。"""
         if self.persistent:
             ctx_options = dict(context_options)
             storage_state = ctx_options.pop("storage_state", None)
@@ -827,8 +920,6 @@ class PlaywrightExecutor:
             self._context = await self._browser.new_context(**context_options)
             await self._apply_context_init_scripts(self._context)
             self._page = await self._context.new_page()
-        self._page.set_default_timeout(self.action_timeout)
-        self._log_auth_injection()
 
     async def init_browser(self) -> None:
         """初始化浏览器"""
@@ -1865,7 +1956,7 @@ class PlaywrightExecutor:
                     base_url = config.env_config.get('base_url', '') or ''
                 if base_url:
                     logger.info(f"导航到环境 base_url: {base_url}")
-                    await self._goto_with_login_check(page, base_url, wait_until="networkidle")
+                    await self._goto_with_login_check(page, base_url, **_ENV_BASE_URL_NAV)
 
                 pending_auth = None
                 for page_step in config.page_steps:
@@ -1992,6 +2083,8 @@ class PlaywrightExecutor:
                 message = f"用例执行{'成功' if status == 'success' else '失败'}: 通过 {passed_steps}/{total_steps}"
                 if hasattr(self, '_page_errors') and self._page_errors:
                     message += f" (捕获 {len(self._page_errors)} 个页面 JS 错误: {'; '.join(self._page_errors[:3])})"
+                if getattr(self, '_last_cert_failure', None):
+                    message += f" （提示：{self._last_cert_failure}）"
                 logger.info(f"✅ {message}" if status == 'success' else f"❌ {message}")
                 
                 # 获取 trace 文件路径（会在 browser_session_with_trace 结束时设置）
@@ -2168,7 +2261,7 @@ class PlaywrightExecutor:
                 base_url = config.env_config.get('base_url', '') or ''
             if base_url:
                 logger.info(f"[并发] 导航到环境 base_url: {base_url}")
-                await self._goto_with_login_check(page, base_url, wait_until="networkidle")
+                await self._goto_with_login_check(page, base_url, **_ENV_BASE_URL_NAV)
 
             for page_step in config.page_steps:
                 if self._stop_requested:
@@ -2268,6 +2361,8 @@ class PlaywrightExecutor:
             message = f"用例执行{'成功' if status == 'success' else '失败'}: 通过 {passed_steps}/{total_steps}"
             if hasattr(self, '_page_errors') and self._page_errors:
                 message += f" (捕获 {len(self._page_errors)} 个页面 JS 错误: {'; '.join(self._page_errors[:3])})"
+            if getattr(self, '_last_cert_failure', None):
+                message += f" （提示：{self._last_cert_failure}）"
 
             # 保存 Trace
             if trace_enabled:

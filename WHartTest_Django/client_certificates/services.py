@@ -28,6 +28,7 @@ from typing import Iterable, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.exceptions import SynchronousOnlyOperation
 
 logger = logging.getLogger(__name__)
 
@@ -248,15 +249,45 @@ def build_env_client_cert_payload(env) -> Optional[dict]:
     """按 UI 环境配置构造待下发执行器的证书载荷（环境未绑定证书时返回 None）。
 
     收敛到一处，保证 WebSocket 单用例/批量与 HTTP 批量触发三条下发路径行为一致。
+
+    ⚠️ **同步函数**：内部会通过外键懒加载 ``client_certificate`` 及其
+    ``cert_file`` / ``key_file``。**绝不可在异步上下文（Channels consumer 的事件
+    循环）里直接调用** —— 同步 ORM 会抛 ``SynchronousOnlyOperation``。异步调用方
+    请改用 :func:`build_env_client_cert_payload_async`。
     """
     if env is None or not getattr(env, 'client_certificate_id', None):
         return None
     origins = [env.base_url] if getattr(env, 'base_url', None) else []
     try:
         return build_runtime_client_cert(env.client_certificate, origins=origins)
+    except SynchronousOnlyOperation:
+        # 编程错误（不是证书本身的问题），必须明显区别于「证书不可用」的降级：
+        # 早期版本把它一起吞成「本次不启用证书」，导致 mTLS 站点只看到 400/白屏、
+        # 日志里只有一条不起眼的告警，排查代价极高。这里按 ERROR 记录并给出改法。
+        logger.error(
+            '构造环境 %s 的客户端证书载荷失败：检测到在异步上下文内同步访问 ORM，'
+            '请改用 build_env_client_cert_payload_async()。本次未下发客户端证书。',
+            getattr(env, 'id', None),
+        )
+        return None
     except Exception as exc:  # noqa: BLE001 - 证书组装失败不应阻断任务下发
         logger.warning('构造环境 %s 的客户端证书载荷失败：%s', getattr(env, 'id', None), exc)
         return None
+
+
+async def build_env_client_cert_payload_async(env) -> Optional[dict]:
+    """:func:`build_env_client_cert_payload` 的**异步上下文安全版**。
+
+    专供 Channels 异步 consumer（``ui_automation.consumers``）使用：载荷组装会触发
+    ``client_certificate`` → ``cert_file`` / ``key_file`` 等外键懒加载，直接在事件循环
+    内执行会被 Django 拒绝（``SynchronousOnlyOperation``）。这里统一丢进线程池，调用方
+    无需再关心 DB 线程边界。
+
+    失败语义与同步版一致：任何异常都降级为 ``None``（本次不启用客户端证书），不阻断任务。
+    """
+    from asgiref.sync import sync_to_async
+
+    return await sync_to_async(build_env_client_cert_payload)(env)
 
 
 # ----------------------------------------------------------------------

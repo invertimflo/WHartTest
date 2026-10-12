@@ -63,6 +63,9 @@ def execute_scheduled_task(self, task_id: int, trigger_type: str = 'scheduled'):
                     'actuator_id': task.actuator_id,
                     'batch_name': f"定时任务-{task.name}",
                     'trigger_type': 'scheduled',
+                    # 绑定环境后，执行时按该环境解析基础 URL / 登录态，
+                    # 并由后端自动携带客户端证书配置下发给执行器
+                    'env_config_id': task.env_config_id,
                 },
                 headers={'Authorization': f'Bearer {token}'},
                 timeout=30,

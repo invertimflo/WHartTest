@@ -59,6 +59,15 @@ class ScheduledTask(models.Model):
         verbose_name=_('关联UI用例'),
         help_text=_('模块为"UI自动化"时选择要执行的用例')
     )
+    env_config = models.ForeignKey(
+        'ui_automation.UiEnvironmentConfig', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='scheduled_tasks',
+        verbose_name=_('UI 环境'),
+        help_text=_(
+            '模块为"UI自动化"时可选：绑定环境后，执行时自动使用该环境配置'
+            '（含基础 URL、登录态与客户端证书），客户端证书随任务自动下发到执行器'
+        )
+    )
 
     # 调度配置
     schedule_type = models.CharField(

@@ -559,9 +559,14 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         # HTTPS 客户端证书：把「托管文件描述 + 口令」挂到任务参数上，执行器据此
         # 下载证书文件并注入 Playwright。⚠️ 口令明文只经此 WebSocket 通道下发执行器，
         # 回传前端前必须经 _sanitize_result_args 剥离。
-        from client_certificates.services import build_env_client_cert_payload
+        #
+        # 必须用 *_async 版本：本方法运行在异步 consumer 的事件循环里，而载荷组装会
+        # 懒加载 client_certificate → cert_file/key_file 等外键，同步 ORM 会抛
+        # SynchronousOnlyOperation（此前被兜底 except 静默吞掉 → 执行器永远拿不到
+        # 证书 → mTLS 站点只剩 400 Bad Request / 白屏）。详见 client_certificates.services。
+        from client_certificates.services import build_env_client_cert_payload_async
 
-        args["client_cert"] = build_env_client_cert_payload(env)
+        args["client_cert"] = await build_env_client_cert_payload_async(env)
         return args, actuator, ""
 
     @staticmethod
@@ -1819,11 +1824,6 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             'step_interval', 'log_level',
             'trace_enabled', 'trace_screenshots', 'trace_snapshots', 'trace_sources',
             'headless', 'viewport_width', 'viewport_height', 'in_container',
-            # HTTPS 客户端证书路径（不含 passphrase：口令只留在执行器本机）。
-            # 必须在此白名单内，否则 list_actuators 取不到值 → 前端以 '' 预填 →
-            # 保存时把执行器上已配置的路径清空。
-            'client_cert_enabled', 'client_cert_pfx_path', 'client_cert_cert_path',
-            'client_cert_key_path', 'client_cert_origins',
         )
         for key in config_keys:
             if key in args and args[key] is not None:
