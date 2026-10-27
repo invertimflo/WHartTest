@@ -1588,6 +1588,7 @@ class TaskConsumer:
         data_processor: Optional[DataProcessor] = None,
         case_data_override: Optional[dict] = None,
         env_config: Optional[dict] = None,
+        switch_open_url: bool = True,
     ) -> PageStepConfig:
         """构建页面步骤配置
         
@@ -1597,6 +1598,7 @@ class TaskConsumer:
             data_processor: 变量处理器，用于替换 ${{变量名}} 语法
             case_data_override: 用例步骤的覆盖数据
             env_config: 执行环境配置，用于 SQL 步骤获取数据库连接
+            switch_open_url: 执行本页面步骤前是否先跳转到 page_url（用例步骤开关）
         """
         steps = []
         
@@ -1798,6 +1800,7 @@ class TaskConsumer:
             steps=steps,
             env_config=env_config,
             auth_state_id=data.get('auth_state_id') or data.get('auth_state'),
+            switch_open_url=bool(switch_open_url),
         )
     
     def _build_test_case_config(self, data: dict, env_config: Optional[dict] = None, data_processor: Optional[DataProcessor] = None) -> TestCaseConfig:
@@ -1820,7 +1823,14 @@ class TaskConsumer:
             page_step_data = case_step.get('page_step', {})
             case_data_override = case_step.get('case_data') or {}
             if page_step_data:
-                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor, case_data_override, env_config))
+                # 「切换页面URL」开关：缺省视为开启（与模型默认值一致）
+                switch_open_url = case_step.get('switch_step_open_url')
+                if switch_open_url is None:
+                    switch_open_url = True
+                page_steps.append(self._build_page_step_config(
+                    page_step_data, base_url, data_processor, case_data_override,
+                    env_config, switch_open_url=bool(switch_open_url),
+                ))
         
         return TestCaseConfig(
             case_id=data.get('id', 0),

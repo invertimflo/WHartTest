@@ -26,6 +26,16 @@
           <template #icon><icon-refresh /></template>
           {{ pageText.refresh }}
         </a-button>
+        <a-popconfirm
+          :content="batchDeleteConfirm"
+          :disabled="!selectedRowKeys.length"
+          @ok="handleBatchDelete"
+        >
+          <a-button status="danger" :disabled="!selectedRowKeys.length" style="margin-left: 12px">
+            <template #icon><icon-delete /></template>
+            {{ pageText.batchDelete }}{{ selectedRowKeys.length ? `（${selectedRowKeys.length}）` : '' }}
+          </a-button>
+        </a-popconfirm>
       </div>
     </div>
 
@@ -36,6 +46,8 @@
       :loading="loading"
       :scroll="{ x: 1100 }"
       row-key="id"
+      v-model:selectedKeys="selectedRowKeys"
+      :row-selection="rowSelection"
       @page-change="onPageChange"
       @page-size-change="onPageSizeChange"
     >
@@ -188,6 +200,20 @@ const loading = ref(false)
 const recordData = ref<UiExecutionRecord[]>([])
 const drawerVisible = ref(false)
 const currentRecord = ref<UiExecutionRecord | null>(null)
+const selectedRowKeys = ref<(string | number)[]>([])
+// onlyCurrent：只在本页内全选，避免跨页勾选造成「看不见的删除」
+const rowSelection = { type: 'checkbox' as const, showCheckedAll: true, onlyCurrent: true }
+
+const selectedRecords = computed(() => {
+  const ids = selectedRowKeys.value.map(Number)
+  return recordData.value.filter((item) => ids.includes(item.id))
+})
+
+const batchDeleteConfirm = computed(() => {
+  const count = selectedRowKeys.value.length
+  if (!count) return pageText.value.batchDeleteSelectFirst
+  return pageText.value.batchDeleteConfirm(count)
+})
 
 const pageText = computed(() => (
   isEnglish.value
@@ -227,6 +253,12 @@ const pageText = computed(() => (
         actionsColumn: 'Actions',
         deleteSuccess: 'Deleted successfully',
         deleteFailed: 'Delete failed',
+        batchDelete: 'Batch Delete',
+        batchDeleteConfirm: (count: number) => `Delete the selected ${count} execution records? Related screenshots, videos, and trace files will also be deleted.`,
+        batchDeleteSelectFirst: 'Select the execution records to delete first',
+        batchDeleteRunning: (names: string) => `These execution records are still running and cannot be deleted: ${names}`,
+        batchDeleteSuccess: (count: number) => `Deleted ${count} execution records`,
+        batchDeleteFailed: 'Batch delete failed',
         passed: 'Passed',
         failed: 'Failed',
         skipped: 'Skipped',
@@ -268,6 +300,12 @@ const pageText = computed(() => (
         actionsColumn: '操作',
         deleteSuccess: '删除成功',
         deleteFailed: '删除失败',
+        batchDelete: '批量删除',
+        batchDeleteConfirm: (count: number) => `确定删除选中的 ${count} 条执行记录？关联的截图、视频、Trace 文件将一并删除。`,
+        batchDeleteSelectFirst: '请先勾选要删除的执行记录',
+        batchDeleteRunning: (names: string) => `以下执行记录正在执行，不允许删除：${names}`,
+        batchDeleteSuccess: (count: number) => `已删除 ${count} 条执行记录`,
+        batchDeleteFailed: '批量删除失败',
         passed: '通过',
         failed: '失败',
         skipped: '跳过',
@@ -442,11 +480,52 @@ const handleDelete = async (id: number) => {
   try {
     await executionRecordApi.delete(id)
     Message.success(pageText.value.deleteSuccess)
+    selectedRowKeys.value = selectedRowKeys.value.filter((key) => Number(key) !== id)
     fetchRecords()
   } catch {
     Message.error(pageText.value.deleteFailed)
   }
 }
+
+const handleBatchDelete = async () => {
+  const ids = selectedRowKeys.value.map(Number).filter((id) => Number.isFinite(id))
+  if (!ids.length) {
+    Message.warning(pageText.value.batchDeleteSelectFirst)
+    return
+  }
+
+  // status=1 执行中：删除后执行进程写回结果会因记录不存在而报错，前端先拦一道
+  const running = selectedRecords.value.filter((item) => item.status === 1)
+  if (running.length) {
+    const names = running
+      .map((item) => item.test_case_name ?? `ID: ${item.id}`)
+      .slice(0, 5)
+      .join('、')
+    Message.warning(pageText.value.batchDeleteRunning(names))
+    return
+  }
+
+  try {
+    const res = await executionRecordApi.batchDelete(ids, projectId.value)
+    const data = extractResponseData<{ deleted_count?: number }>(res)
+    const deleted = data?.deleted_count ?? ids.length
+    Message.success(pageText.value.batchDeleteSuccess(deleted))
+    selectedRowKeys.value = []
+    fetchRecords()
+  } catch (error: unknown) {
+    const err = error as { error?: string; detail?: string }
+    Message.error(err?.error || err?.detail || pageText.value.batchDeleteFailed)
+  }
+}
+
+// 列表刷新/筛选后清理已不存在的勾选项
+watch(
+  () => recordData.value.map((item) => item.id),
+  (ids) => {
+    if (!selectedRowKeys.value.length) return
+    selectedRowKeys.value = selectedRowKeys.value.filter((key) => ids.includes(Number(key)))
+  },
+)
 
 const refresh = () => fetchRecords()
 
@@ -455,6 +534,7 @@ defineExpose({ refresh })
 watch(projectId, () => {
   if (projectId.value) {
     pagination.current = 1
+    selectedRowKeys.value = []
     fetchRecords()
   }
 }, { immediate: true })

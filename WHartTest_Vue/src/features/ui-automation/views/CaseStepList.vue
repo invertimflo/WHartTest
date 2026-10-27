@@ -122,7 +122,14 @@
         <a-row :gutter="16">
           <a-col :span="12">
             <a-form-item field="switch_step_open_url" :label="pageText.switchPageUrl">
-              <a-switch v-model="formData.switch_step_open_url" />
+              <a-space :size="6">
+                <a-switch v-model="formData.switch_step_open_url" />
+                <a-tooltip
+                  content="开启后，执行到本步骤前会先跳转到该页面步骤所绑定页面配置的 URL；关闭则停留在当前页面继续操作"
+                >
+                  <icon-info-circle style="color: var(--color-text-3); cursor: help" />
+                </a-tooltip>
+              </a-space>
             </a-form-item>
           </a-col>
           <a-col :span="12">
@@ -168,7 +175,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
-import { IconPlus, IconEdit, IconDelete, IconDragDotVertical } from '@arco-design/web-vue/es/icon'
+import { IconPlus, IconEdit, IconDelete, IconDragDotVertical, IconInfoCircle } from '@arco-design/web-vue/es/icon'
 import draggable from 'vuedraggable'
 import { caseStepsApi, pageStepsApi, moduleApi, envConfigApi, authStateApi } from '../api'
 import type { UiCaseStepsDetailed, UiPageSteps, UiTestCase, ExecutionStatus, UiModule, UiEnvironmentConfig, UiAuthState } from '../types'
@@ -462,7 +469,7 @@ watch(modalVisible, (v) => {
 
 const formData = reactive({
   page_step: undefined as number | undefined,
-  switch_step_open_url: false,
+  switch_step_open_url: true,
   error_retry: 0,
 })
 
@@ -497,7 +504,7 @@ const fetchPageSteps = async () => {
 }
 
 const resetForm = () => {
-  Object.assign(formData, { page_step: undefined, switch_step_open_url: false, error_retry: 0 })
+  Object.assign(formData, { page_step: undefined, switch_step_open_url: true, error_retry: 0 })
   formRef.value?.clearValidate()
 }
 
@@ -515,7 +522,7 @@ const editStep = async (step: UiCaseStepsDetailed) => {
   currentStep.value = step
   Object.assign(formData, {
     page_step: step.page_step,
-    switch_step_open_url: step.switch_step_open_url,
+    switch_step_open_url: step.switch_step_open_url ?? true,
     error_retry: step.error_retry,
   })
   

@@ -28,6 +28,36 @@ def _ui_request_user(serializer):
     return request.user if request else None
 
 
+# ==================== 页面 URL / 登录态快照校验辅助 ====================
+
+# 站内相对路径与 http(s) 绝对地址之外一律拒绝（javascript:/data: 会让 page.goto 直接失败或越权执行脚本）
+_PAGE_URL_BLOCKED_SCHEMES = ('javascript:', 'data:', 'file:', 'ftp:', 'vbscript:')
+
+_SAME_SITE_VALUES = ('Strict', 'Lax', 'None')
+
+
+def _as_text(value) -> str:
+    """把任意标量安全转成字符串（Cookie / localStorage 的值可能是数字或布尔）。"""
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _normalize_expires(value) -> float:
+    """Cookie 过期时间统一为 Unix 秒；-1 表示会话型 Cookie。"""
+    if value in (None, ''):
+        return -1
+    try:
+        expires = float(value)
+    except (TypeError, ValueError):
+        raise serializers.ValidationError(
+            'Cookie 的 expires 必须是数字（Unix 秒，-1 表示会话型）'
+        )
+    return -1 if expires <= 0 else expires
+
+
 def _resolve_upload_ope_value(obj, serializer):
     value = dict(obj.ope_value or {})
     if obj.ope_key != 'upload':
@@ -126,6 +156,31 @@ class UiPageSerializer(serializers.ModelSerializer):
 
     def get_element_count(self, obj):
         return obj.elements.count()
+
+    def validate_url(self, value):
+        """页面 URL：允许为空；支持 http(s) 绝对地址与站内相对路径。
+
+        这里只做协议白名单校验，**不改写用户输入**：
+        - 相对路径（``/admin`` 或 ``admin``）原样入库，执行时按所选环境的
+          base_url 拼接（见 ``ui_automation/url_utils.py``），更换环境无需改页面；
+        - http(s) 绝对地址原样使用，执行时不再拼接环境 base_url；
+        - javascript:/data: 等协议会让执行器 page.goto 失败或越权执行脚本，直接拒绝。
+        """
+        if value is None:
+            return value
+        url = str(value).strip()
+        if not url:
+            return ''
+        lowered = url.lower()
+        if lowered.startswith(_PAGE_URL_BLOCKED_SCHEMES):
+            raise serializers.ValidationError(
+                '页面 URL 仅支持 http/https 绝对地址或站内相对路径'
+            )
+        if '://' in url and not lowered.startswith(('http://', 'https://')):
+            raise serializers.ValidationError(
+                '页面 URL 仅支持 http/https 绝对地址或站内相对路径'
+            )
+        return url
 
 
 class UiPageDetailSerializer(UiPageSerializer):
@@ -507,6 +562,111 @@ class UiAuthStateSerializer(serializers.ModelSerializer):
         model = UiAuthState
         fields = '__all__'
         read_only_fields = ['creator', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('登录态名称不能为空')
+        return name
+
+    def validate_state_json(self, value):
+        """校验并规范化 Playwright storageState 快照（支持手动编辑后回写）。
+
+        结构：``{"cookies": [...], "origins": [{"origin": "...", "localStorage": [...]}]}``
+        执行器直接把这个 JSON 注入浏览器上下文，结构写坏会导致执行期静默失效，
+        因此在这里做严格校验 + 归一化（补 path、expires 转数字、剔除未知键）。
+        """
+        if not isinstance(value, dict) or not value:
+            raise serializers.ValidationError(
+                '登录态快照不能为空，至少需要一项 Cookie 或 localStorage'
+            )
+
+        unknown = sorted(set(value.keys()) - {'cookies', 'origins'})
+        if unknown:
+            raise serializers.ValidationError(
+                f'登录态快照包含不支持的字段：{"、".join(unknown)}（仅支持 cookies / origins）'
+            )
+
+        raw_cookies = value.get('cookies')
+        if raw_cookies is not None and not isinstance(raw_cookies, list):
+            raise serializers.ValidationError('cookies 必须是数组')
+
+        cookies = []
+        for index, cookie in enumerate(raw_cookies or [], start=1):
+            if not isinstance(cookie, dict):
+                raise serializers.ValidationError(f'第 {index} 个 Cookie 必须是对象')
+            name = _as_text(cookie.get('name')).strip()
+            if not name:
+                raise serializers.ValidationError(f'第 {index} 个 Cookie 缺少 name')
+            if 'value' not in cookie:
+                raise serializers.ValidationError(f'Cookie「{name}」缺少 value')
+
+            normalized = {
+                'name': name,
+                'value': _as_text(cookie.get('value')),
+                'domain': _as_text(cookie.get('domain')).strip(),
+                'path': _as_text(cookie.get('path')).strip() or '/',
+                'expires': _normalize_expires(cookie.get('expires')),
+                'httpOnly': bool(cookie.get('httpOnly', False)),
+                'secure': bool(cookie.get('secure', False)),
+            }
+            same_site = cookie.get('sameSite')
+            if same_site:
+                same_site = str(same_site)
+                if same_site not in _SAME_SITE_VALUES:
+                    raise serializers.ValidationError(
+                        f'Cookie「{name}」的 sameSite 仅支持 Strict / Lax / None'
+                    )
+                normalized['sameSite'] = same_site
+            cookies.append(normalized)
+
+        raw_origins = value.get('origins')
+        if raw_origins is not None and not isinstance(raw_origins, list):
+            raise serializers.ValidationError('origins 必须是数组')
+
+        origins = []
+        for index, origin in enumerate(raw_origins or [], start=1):
+            if not isinstance(origin, dict):
+                raise serializers.ValidationError(f'第 {index} 个 origin 必须是对象')
+            origin_url = _as_text(origin.get('origin')).strip().rstrip('/')
+            if not origin_url.startswith(('http://', 'https://')):
+                raise serializers.ValidationError(
+                    f'第 {index} 个 origin 必须以 http:// 或 https:// 开头'
+                )
+            raw_items = origin.get('localStorage')
+            if raw_items is not None and not isinstance(raw_items, list):
+                raise serializers.ValidationError(f'origin「{origin_url}」的 localStorage 必须是数组')
+
+            items = []
+            for item in raw_items or []:
+                if not isinstance(item, dict):
+                    raise serializers.ValidationError(
+                        f'origin「{origin_url}」的 localStorage 项必须是对象'
+                    )
+                key = _as_text(item.get('name')).strip()
+                if not key:
+                    raise serializers.ValidationError(
+                        f'origin「{origin_url}」存在缺少 name 的 localStorage 项'
+                    )
+                items.append({'name': key, 'value': _as_text(item.get('value'))})
+
+            normalized_origin = {'origin': origin_url, 'localStorage': items}
+            # indexedDB 快照不在编辑 UI 暴露，但原样保留，避免手动编辑时丢失
+            if 'indexedDB' in origin:
+                normalized_origin['indexedDB'] = origin.get('indexedDB')
+            origins.append(normalized_origin)
+
+        if not cookies and not any(o['localStorage'] for o in origins):
+            raise serializers.ValidationError(
+                '登录态快照不能为空，至少需要一项 Cookie 或 localStorage'
+            )
+
+        normalized_state = {}
+        if cookies:
+            normalized_state['cookies'] = cookies
+        if origins:
+            normalized_state['origins'] = origins
+        return normalized_state
 
 
 class UiBatchExecutionRecordSerializer(serializers.ModelSerializer):

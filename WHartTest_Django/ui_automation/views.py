@@ -28,6 +28,8 @@ from .models import (
     UiBatchExecutionRecord, UiAuthState
 )
 from file_management.models import FileReference
+from wharttest_django.permissions import permission_required, HasModelPermission
+from .url_utils import join_env_url
 from .serializers import (
     UiModuleSerializer, UiPageSerializer, UiPageDetailSerializer,
     UiElementSerializer, UiPageStepsSerializer, UiPageStepsListSerializer, UiPageStepsDetailSerializer,
@@ -844,6 +846,32 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
         return Response({'message': '批量更新成功'})
 
 
+def _delete_execution_record_files(instance):
+    """删除执行记录关联的截图 / 视频 / Trace 文件。
+
+    单条删除与批量删除共用，避免两处逻辑漂移留下孤儿文件。
+    文件清理失败只告警不阻断（记录删除优先）。
+    """
+    def safe_delete(path):
+        if not path:
+            return
+        full_path = path if os.path.isabs(path) else os.path.join(
+            settings.MEDIA_ROOT, path.lstrip('/')
+        )
+        try:
+            if os.path.exists(full_path):
+                os.remove(full_path)
+        except OSError as exc:
+            logger.warning('删除执行记录文件失败: %s (%s)', full_path, exc)
+
+    for screenshot in instance.screenshots or []:
+        if isinstance(screenshot, str):
+            safe_delete(screenshot.replace(settings.MEDIA_URL, ''))
+
+    safe_delete(instance.video_path)
+    safe_delete(instance.trace_path)
+
+
 class UiExecutionRecordViewSet(viewsets.ModelViewSet):
     """执行记录管理视图"""
     queryset = UiExecutionRecord.objects.select_related('test_case', 'executor')
@@ -876,29 +904,99 @@ class UiExecutionRecordViewSet(viewsets.ModelViewSet):
 
     def perform_destroy(self, instance):
         """删除执行记录及其关联文件"""
-        import os
-        from django.conf import settings
-
-        def safe_delete(path):
-            if not path:
-                return
-            full_path = path if os.path.isabs(path) else os.path.join(settings.MEDIA_ROOT, path.lstrip('/'))
-            if os.path.exists(full_path):
-                os.remove(full_path)
-
-        # 删除截图
-        for screenshot in instance.screenshots or []:
-            if isinstance(screenshot, str):
-                safe_delete(screenshot.replace(settings.MEDIA_URL, ''))
-
-        # 删除视频
-        safe_delete(instance.video_path)
-
-        # 删除 Trace 文件
-        safe_delete(instance.trace_path)
-
+        _delete_execution_record_files(instance)
         instance.delete()
-    
+
+    @action(
+        detail=False, methods=['post'], url_path='batch-delete',
+        # 覆盖全局 DjangoModelPermissions：否则自定义 POST 会按 add_* 判权，
+        # 批量删除却要求「新增」权限，语义不一致。
+        permission_classes=[IsAuthenticated, HasModelPermission],
+    )
+    @permission_required('ui_automation.delete_uiexecutionrecord')
+    def batch_delete(self, request):
+        """批量删除执行记录。POST: {"ids": [1, 2], "project": 3}
+
+        「执行中」（status=1）的记录正在被执行进程写回结果，删除后写回会因记录不存在而报错，
+        因此整批拒绝；删除口径与单条删除一致，同时清理截图 / 视频 / Trace 文件。
+        """
+        raw_ids = request.data.get('ids') or []
+        if not isinstance(raw_ids, (list, tuple)) or not raw_ids:
+            return Response(
+                {'error': '请提供要删除的执行记录ID列表'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        record_ids = []
+        for item in raw_ids:
+            if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+                return Response(
+                    {'error': 'ids 参数格式错误，应为正整数列表'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            record_ids.append(item)
+
+        queryset = self.get_queryset().filter(id__in=record_ids)
+
+        project_id = request.data.get('project') or request.query_params.get('project')
+        if project_id:
+            try:
+                project_id = int(project_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {'error': 'project 参数必须是整数'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            queryset = queryset.filter(test_case__project_id=project_id)
+
+        records = list(queryset)
+        found_ids = [record.id for record in records]
+        not_found_ids = [record_id for record_id in record_ids if record_id not in found_ids]
+        if not_found_ids:
+            return Response(
+                {
+                    'error': f'以下执行记录不存在或不属于当前项目: {not_found_ids}',
+                    'not_found_ids': not_found_ids,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # status=1 为「执行中」
+        blocked = [record for record in records if record.status == 1]
+        if blocked:
+            detail = '、'.join(
+                f'「{record.test_case.name if record.test_case_id else record.id}」'
+                for record in blocked[:10]
+            )
+            return Response(
+                {
+                    'error': f'以下执行记录正在执行，不允许删除：{detail}',
+                    'blocked_ids': [record.id for record in blocked],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                for record in records:
+                    _delete_execution_record_files(record)
+                    record.delete()
+        except Exception as exc:  # noqa: BLE001 - 直接回传原因给前端
+            logger.exception('批量删除执行记录失败')
+            return Response(
+                {'error': f'批量删除失败: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                'message': f'成功删除 {len(found_ids)} 条执行记录',
+                'deleted_count': len(found_ids),
+                'deleted_ids': found_ids,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=True, methods=['get'], url_path='trace')
     def get_trace_data(self, request, pk=None):
         """获取执行记录的 Trace 数据
@@ -1720,14 +1818,15 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         if page_step is None:
             return Response({'detail': '请选择当前页面下的页面步骤'}, status=status.HTTP_400_BAD_REQUEST)
 
-        base_url = (env_config.base_url or page.url or '').strip()
+        # 与执行期同一套拼接语义：相对路径的页面 URL 会拼到环境 base_url 之后
+        base_url = join_env_url(env_config.base_url, page.url)
         if not base_url:
             return Response(
                 {
                     'detail': (
                         f'所选环境「{env_config.name}」未配置 base_url，且页面「{page.name}」也未配置 url，'
-                        '无法确定录制导航地址。请先在环境配置中填写 base_url（录制优先使用环境地址），'
-                        '或填写页面 url。'
+                        '无法确定录制导航地址。请先在环境配置中填写 base_url，'
+                        '或填写页面 url（相对路径会拼接到 base_url 之后）。'
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,

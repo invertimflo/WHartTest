@@ -159,7 +159,7 @@ services:
     #   dockerfile: Dockerfile
     container_name: wharttest-frontend
     ports:
-      - "8913:80"
+      - "80:80"
     depends_on:
       - backend
     networks:

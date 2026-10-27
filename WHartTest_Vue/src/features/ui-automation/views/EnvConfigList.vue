@@ -74,7 +74,8 @@
     >
       <a-alert type="info" style="margin-bottom: 12px">
         执行任务时执行器会自动按环境注入此登录态（cookies + localStorage，兼容 Cookie/Session 与
-        JWT 系统），无需登录页与验证码。点「录制登录态」在录制窗口中完成登录后保存即可捕获。
+        JWT 系统），无需登录页与验证码。点「录制登录态」在录制窗口中完成登录后保存即可捕获；
+        也可以点「编辑」直接改 Cookie / localStorage（例如 Token 过期时替换新值）。
       </a-alert>
       <div class="auth-toolbar">
         <a-button type="primary" size="mini" @click="authCaptureVisible = true">
@@ -118,18 +119,13 @@
       </a-table>
     </a-modal>
 
-    <!-- 编辑登录态名称 -->
-    <a-modal v-model:visible="authEditVisible" title="编辑登录态名称" :footer="false" width="420px">
-      <a-form layout="vertical">
-        <a-form-item label="登录态名称">
-          <a-input v-model="authEditName" :max-length="64" allow-clear @press-enter="submitEditAuth" />
-        </a-form-item>
-      </a-form>
-      <div class="auth-edit-actions">
-        <a-button @click="authEditVisible = false">取消</a-button>
-        <a-button type="primary" :loading="authEditing" @click="submitEditAuth">保存</a-button>
-      </div>
-    </a-modal>
+    <!-- 编辑登录态（名称 / Cookie / localStorage / 原始 JSON） -->
+    <AuthStateEditModal
+      v-model:visible="authEditVisible"
+      :auth-state="editingAuth"
+      :base-url="currentAuthEnv?.base_url"
+      @saved="onAuthStateSaved"
+    />
 
     <!-- 录制登录态（登录态采集录制窗口：仅保留保存登录态） -->
     <AuthCaptureModal
@@ -263,6 +259,7 @@ import { IconPlus, IconEdit, IconDelete, IconCheck, IconSafe } from '@arco-desig
 import { useProjectStore } from '@/store/projectStore'
 import { envConfigApi, authStateApi, clientCertificateApi } from '../api'
 import AuthCaptureModal from '../components/AuthCaptureModal.vue'
+import AuthStateEditModal from '../components/AuthStateEditModal.vue'
 import type { UiEnvironmentConfig, UiEnvironmentConfigForm, UiAuthState, UiClientCertificate } from '../types'
 import { extractPaginationData } from '../types'
 
@@ -431,35 +428,16 @@ const openAuthModal = (record: UiEnvironmentConfig) => {
 }
 
 const authEditVisible = ref(false)
-const authEditing = ref(false)
-const authEditName = ref('')
 const editingAuth = ref<UiAuthState | null>(null)
 
 const openEditAuth = (record: UiAuthState) => {
   editingAuth.value = record
-  authEditName.value = record.name || ''
   authEditVisible.value = true
 }
 
-const submitEditAuth = async () => {
-  if (!editingAuth.value) return
-  const name = authEditName.value.trim()
-  if (!name) {
-    Message.error('登录态名称不能为空')
-    return
-  }
-  authEditing.value = true
-  try {
-    await authStateApi.update(editingAuth.value.id, { name })
-    Message.success('名称已更新')
-    authEditVisible.value = false
-    fetchAuthStates()
-  } catch (err) {
-    const detail = (err as { detail?: string })?.detail
-    Message.error(detail || '更新失败')
-  } finally {
-    authEditing.value = false
-  }
+const onAuthStateSaved = () => {
+  authEditVisible.value = false
+  fetchAuthStates()
 }
 
 const deleteAuthState = async (record: UiAuthState) => {
@@ -674,11 +652,6 @@ watch(projectId, () => {
   padding: 16px;
   border-radius: 6px;
   margin-top: 8px;
-}
-.auth-edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
 }
 
 .auth-ops-row {

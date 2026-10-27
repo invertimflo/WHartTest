@@ -33,6 +33,32 @@ logger = logging.getLogger('actuator')
 # （= action_timeout，config.toml 默认仅 5s），于是必然 5s 超时报错。
 _ENV_BASE_URL_NAV = {"wait_until": "domcontentloaded", "timeout": 30000}
 
+
+def _normalize_url_for_compare(url: str) -> str:
+    """URL 归一化，仅用于「是否已经在目标页」的比较。
+
+    去掉首尾空白、末尾斜杠，并把 scheme/host 转小写；query/fragment 原样保留。
+    """
+    text = str(url or '').strip()
+    if not text:
+        return ''
+    text = text.rstrip('/')
+    if '://' in text:
+        scheme, rest = text.split('://', 1)
+        host, sep, tail = rest.partition('/')
+        return f"{scheme.lower()}://{host.lower()}{sep}{tail}"
+    return text
+
+
+def _same_page(current_url: str, target_url: str) -> bool:
+    """当前页是否已经是目标页（只比较到 path，忽略 query/hash 差异）。"""
+    current = _normalize_url_for_compare(current_url)
+    target = _normalize_url_for_compare(target_url)
+    if not current or not target:
+        return False
+    return current.split('#', 1)[0].split('?', 1)[0] == target.split('#', 1)[0].split('?', 1)[0]
+
+
 DEFAULT_STEALTH_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -115,6 +141,8 @@ class PageStepConfig:
     # 步骤绑定的登录态：auth_state_id 来自平台，auth 为解析后的 storage_state（执行时按组切换）
     auth_state_id: Optional[int] = None
     auth: Optional[dict] = None
+    # 执行到本页面步骤前是否先跳转到 page_url（用例步骤的「切换页面URL」开关）
+    switch_open_url: bool = True
 
 
 @dataclass
@@ -837,6 +865,13 @@ class PlaywrightExecutor:
         ERR_ABORTED/导航被中断：站点自身跳转（302/前端 location）仍在途中时
         插入的 goto 会被 Chromium 中止，等待其稳定后重试一次。
         """
+        # 页面 URL 允许填相对路径（执行时由环境 base_url 补全）。若执行时没选环境，
+        # 拼出来的仍是相对路径，Playwright 只会抛 "Cannot navigate to invalid URL"，
+        # 这里提前给出可操作的报错。
+        if not str(url or '').strip() or '://' not in str(url):
+            raise ValueError(
+                f'导航地址「{url}」不是完整 URL：页面 URL 为相对路径时，请在执行前选择已配置 base_url 的环境'
+            )
         try:
             await page.goto(url, **kwargs)
         except Exception as e:
@@ -1950,13 +1985,21 @@ class PlaywrightExecutor:
                 self._page_errors = []
                 self._setup_page_listeners(page)
 
-                # 浏览器启动后，立即导航到环境配置的 base_url
+                # 首个导航地址：开启「切换页面URL」时直接落到首个页面步骤的目标地址
+                # （由该组自己导航，避免与组内 goto 同址重复导航相互竞争，冒出 ERR_ABORTED）；
+                # 未开启或未配页面 URL 时仍跳环境 base_url，保留原有的环境落地行为。
                 base_url = ''
                 if config.env_config:
                     base_url = config.env_config.get('base_url', '') or ''
-                if base_url:
-                    logger.info(f"导航到环境 base_url: {base_url}")
-                    await self._goto_with_login_check(page, base_url, **_ENV_BASE_URL_NAV)
+                first_step = config.page_steps[0] if config.page_steps else None
+                start_url = base_url
+                if (first_step is not None
+                        and getattr(first_step, 'switch_open_url', True)
+                        and first_step.page_url):
+                    start_url = first_step.page_url
+                if start_url:
+                    logger.info(f"用例首个导航: {start_url}")
+                    await self._goto_with_login_check(page, start_url, **_ENV_BASE_URL_NAV)
 
                 pending_auth = None
                 for page_step in config.page_steps:
@@ -1969,19 +2012,30 @@ class PlaywrightExecutor:
                         pending_auth = getattr(page_step, 'auth', None)
                     rebuilt = await self.ensure_auth_context(pending_auth)
                     page = self._page
+                    # 本次是否已主动导航过（已导航则跳过下面的被动跳转检测）
+                    navigated = False
                     if rebuilt:
                         self._setup_page_listeners(page)
                         nav_url = page_step.page_url or base_url
                         if nav_url:
                             await self._goto_with_login_check(page, nav_url, wait_until="domcontentloaded")
+                            navigated = True
+                    elif getattr(page_step, 'switch_open_url', True) and page_step.page_url:
+                        # 「切换页面URL」开启：执行本组步骤前先跳到该页面步骤配置的地址
+                        if _same_page(page.url, page_step.page_url):
+                            logger.debug(f"已在目标页面，跳过导航: {page.url}")
+                        else:
+                            logger.info(f"切换到页面: {page_step.page_url}（当前 {page.url}）")
+                            await self._goto_with_login_check(page, page_step.page_url, **_ENV_BASE_URL_NAV)
+                        navigated = True
 
                     logger.info(f"执行页面步骤: {page_step.page_name}")
 
                     # 确保使用最新的页签引用进行环境跳转检测
                     page = self._page
 
-                    # 检测页面跳转：仅当下一个页面 URL 与当前不同时才等待
-                    if page_step.page_url:
+                    # 被动跳转检测：仅在本次没有主动导航时才等待（避免白等 2s）
+                    if not navigated and page_step.page_url:
                         current_url = page.url
                         expected_url = page_step.page_url.rstrip('/')
                         
@@ -2255,13 +2309,19 @@ class PlaywrightExecutor:
 
             logger.info(f"[并发] 开始执行用例: {config.case_name}")
 
-            # 浏览器启动后，立即导航到环境配置的 base_url
+            # 首个导航地址：与串行执行同一口径（见 execute_test_case）
             base_url = ''
             if config.env_config:
                 base_url = config.env_config.get('base_url', '') or ''
-            if base_url:
-                logger.info(f"[并发] 导航到环境 base_url: {base_url}")
-                await self._goto_with_login_check(page, base_url, **_ENV_BASE_URL_NAV)
+            first_step = config.page_steps[0] if config.page_steps else None
+            start_url = base_url
+            if (first_step is not None
+                    and getattr(first_step, 'switch_open_url', True)
+                    and first_step.page_url):
+                start_url = first_step.page_url
+            if start_url:
+                logger.info(f"[并发] 用例首个导航: {start_url}")
+                await self._goto_with_login_check(page, start_url, **_ENV_BASE_URL_NAV)
 
             for page_step in config.page_steps:
                 if self._stop_requested:
@@ -2269,8 +2329,18 @@ class PlaywrightExecutor:
 
                 logger.info(f"[并发] 执行页面步骤: {page_step.page_name}")
 
-                # 检测页面跳转：仅当下一个页面 URL 与当前不同时才等待
-                if page_step.page_url:
+                # 「切换页面URL」开启：执行本组步骤前先跳到该页面步骤配置的地址
+                navigated = False
+                if getattr(page_step, 'switch_open_url', True) and page_step.page_url:
+                    if _same_page(page.url, page_step.page_url):
+                        logger.debug(f"[并发] 已在目标页面，跳过导航: {page.url}")
+                    else:
+                        logger.info(f"[并发] 切换到页面: {page_step.page_url}（当前 {page.url}）")
+                        await self._goto_with_login_check(page, page_step.page_url, **_ENV_BASE_URL_NAV)
+                    navigated = True
+
+                # 被动跳转检测：仅在本次没有主动导航时才等待
+                if not navigated and page_step.page_url:
                     current_url = page.url
                     expected_url = page_step.page_url.rstrip('/')
 

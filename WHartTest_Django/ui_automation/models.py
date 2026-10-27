@@ -317,7 +317,8 @@ class UiCaseStepsDetailed(models.Model):
     case_data = models.JSONField(_('步骤数据覆盖'), null=True, blank=True)
     case_cache_data = models.JSONField(_('缓存数据'), null=True, blank=True)
     case_cache_ass = models.JSONField(_('断言缓存'), null=True, blank=True)
-    switch_step_open_url = models.BooleanField(_('切换URL'), default=False)
+    # 执行到该步骤前是否先跳转到页面步骤配置的 URL（默认开启）
+    switch_step_open_url = models.BooleanField(_('切换URL'), default=True)
     error_retry = models.SmallIntegerField(_('失败重试次数'), default=0)
     status = models.SmallIntegerField(_('状态'), choices=STATUS_CHOICES, default=0)
     error_message = models.TextField(_('错误信息'), null=True, blank=True)

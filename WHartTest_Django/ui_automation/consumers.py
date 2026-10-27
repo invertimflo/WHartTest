@@ -21,6 +21,7 @@ from .socket_models import (
     UiSocketEnum, ExecutionTaskModel, StepResultModel, CaseResultModel
 )
 from wharttest_django.i18n import translate_app_text
+from .url_utils import join_env_url
 
 logger = logging.getLogger('ui_automation')
 
@@ -896,6 +897,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 UiEnvironmentConfig.objects.filter(id=env_config_id).first
             )()
         groups = []
+        # 与 groups 一一对应的「切换页面URL」开关（页面步骤调试恒为 True：必须先导航）
+        group_switch = []
         project_id = 0
         if kind == 'page_steps':
             page_step = await sync_to_async(
@@ -906,6 +909,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 return
             project_id = page_step.project_id or 0
             groups = [page_step]
+            group_switch = [True]
         else:
             case = await sync_to_async(
                 UiTestCase.objects.filter(id=args.get('case_id')).first
@@ -920,6 +924,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 .order_by('case_sort')
             ))()
             groups = [cs.page_step for cs in case_steps if cs.page_step is not None]
+            group_switch = [
+                True if cs.switch_step_open_url is None else bool(cs.switch_step_open_url)
+                for cs in case_steps if cs.page_step is not None
+            ]
             if not groups:
                 await self._recorder_exec_error(kind, args, user, '用例没有可执行的页面步骤')
                 return
@@ -946,16 +954,16 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         # 预加载每组导航地址（页面外键在异步上下文中不可触发）
         from .models import UiPage as _UiPage
 
+        env_base_url = (env_config.base_url or '') if env_config is not None else ''
+
         def _load_group_urls(page_steps) -> list:
+            """每组的目标地址：页面 URL 与环境 base_url 按执行期同一语义拼接。"""
             urls = []
             for ps in page_steps:
-                url = ''
-                if env_config is not None and env_config.base_url:
-                    url = env_config.base_url
-                elif ps.page_id:
-                    page_obj = _UiPage.objects.filter(id=ps.page_id).values_list('url', flat=True).first()
-                    url = page_obj or ''
-                urls.append(str(url or '').strip())
+                page_url = ''
+                if ps.page_id:
+                    page_url = _UiPage.objects.filter(id=ps.page_id).values_list('url', flat=True).first() or ''
+                urls.append(join_env_url(env_base_url, page_url))
             return urls
 
         group_bases = await sync_to_async(_load_group_urls)(groups)
@@ -1071,13 +1079,30 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 #（与执行器 total_steps 口径一致：sum(len(ps.steps))）
                 group_step_count = len(steps)
                 base_url = group_bases[group_index - 1]
-                if base_url:
+                # 导航策略与执行器同一口径：
+                # - 首组必须导航（会话从 about:blank 起步）：开关关闭时只落环境根地址；
+                # - 其余组按「切换页面URL」开关决定是否跳到该页面地址。
+                switch_url = group_switch[group_index - 1] if group_index <= len(group_switch) else True
+                should_nav = switch_url or group_index == 1
+                nav_url = base_url
+                if group_index == 1 and not switch_url:
+                    nav_url = env_base_url or base_url
+                if should_nav and nav_url:
+                    logger.info(
+                        '[recorder-exec] 第 %d 组导航 switch=%s -> %s',
+                        group_index, switch_url, nav_url,
+                    )
                     steps = [{
                         'ope_key': 'goto',
-                        'ope_value': {'url': base_url},
+                        'ope_value': {'url': nav_url},
                         'step_type': 0,
                         'element': None,
                     }] + steps
+                else:
+                    logger.info(
+                        '[recorder-exec] 第 %d 组不导航（切换页面URL已关闭），停留当前页',
+                        group_index,
+                    )
                 total_steps += group_step_count
                 resp = await asyncio.to_thread(
                     session.request, 'run_steps', {'steps': steps}, 180,

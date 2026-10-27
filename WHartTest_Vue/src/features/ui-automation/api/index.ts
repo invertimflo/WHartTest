@@ -182,6 +182,13 @@ export const executionRecordApi = {
 
   delete: (id: number) => request.delete(`${BASE_URL}/execution-records/${id}/`),
 
+  /** 批量删除执行记录（执行中的记录会被后端整批拒绝） */
+  batchDelete: (ids: number[], project?: number) =>
+    request.post<{ deleted_count: number; deleted_ids: number[]; not_found_ids?: number[] }>(
+      `${BASE_URL}/execution-records/batch-delete/`,
+      { ids, project },
+    ),
+
   /** 获取执行记录的 Trace 数据 */
   getTrace: (id: number, refresh?: boolean) =>
     request.get<TraceData>(`${BASE_URL}/execution-records/${id}/trace/`, { params: refresh ? { refresh: '1' } : {} }),
