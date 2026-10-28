@@ -182,6 +182,14 @@ import type { UiCaseStepsDetailed, UiPageSteps, UiTestCase, ExecutionStatus, UiM
 import { STATUS_LABELS, extractListData, extractResponseData } from '../types'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
+// 操作参数主键表与标签与页面步骤编辑器共用同一份（constants.ts），新增操作方法时
+// 覆盖面板会自动出现对应字段，不再出现「页面步骤能配、用例覆盖没入口」的缺口
+import {
+  OPE_PRIMARY_PARAM,
+  OPE_KEY_LABELS,
+  OPE_NUMERIC_OVERRIDE,
+  OPE_OVERRIDE_EXCLUDED,
+} from '../constants'
 
 const props = defineProps<{ testCase: UiTestCase }>()
 
@@ -305,50 +313,26 @@ const fetchModules = async (force = false) => {
   }
 }
 
-const OPE_PARAM_KEYS: Record<string, string> = {
-  fill: 'text',
-  type: 'text',
-  wait: 'timeout',
-  screenshot: 'name',
-  select_option: 'value',
-  assert_text: 'expected',
-  assert_value: 'expected',
-  assert_count: 'expected',
-}
-
-const OPE_KEY_LABELS: Record<string, string> = {
-  click: '点击',
-  dblclick: '双击',
-  hover: '悬停',
-  fill: '填充',
-  type: '输入',
-  clear: '清空',
-  wait: '等待',
-  screenshot: '截图',
-  select_option: '选择下拉',
-  assert_visible: '元素可见',
-  assert_hidden: '元素隐藏',
-  assert_text: '文本断言',
-  assert_value: '值断言',
-  assert_count: '数量断言',
-}
-
 const caseOverrides = reactive<Record<number, any>>({})
 const selectedPageStepDetails = ref<any[]>([])
+
+/** 该步骤详情行是否支持数据覆盖（上传依赖文件选择器，不走文本覆盖） */
+const canOverride = (opeKey: string | undefined | null) =>
+  !!opeKey && !!OPE_PRIMARY_PARAM[opeKey] && !OPE_OVERRIDE_EXCLUDED.has(opeKey)
 
 const overrideFields = computed(() => {
   const fields: any[] = []
   selectedPageStepDetails.value.forEach((detail, index) => {
-    if (detail.ope_key && OPE_PARAM_KEYS[detail.ope_key]) {
-      const key = OPE_PARAM_KEYS[detail.ope_key]
+    if (canOverride(detail.ope_key)) {
+      const key = OPE_PRIMARY_PARAM[detail.ope_key]
       const label = `步骤 ${index + 1}: ${detail.element_name || '无元素'} (${OPE_KEY_LABELS[detail.ope_key] || detail.ope_key})`
       let defaultValue = ''
       if (detail.ope_value && typeof detail.ope_value === 'object') {
         defaultValue = detail.ope_value[key] !== undefined ? String(detail.ope_value[key]) : ''
       }
-      
-      const type = (detail.ope_key === 'wait' || detail.ope_key === 'assert_count') ? 'number' : 'input'
-      
+
+      const type = OPE_NUMERIC_OVERRIDE.has(detail.ope_key) ? 'number' : 'input'
+
       fields.push({
         id: detail.id,
         label,
@@ -536,8 +520,8 @@ const editStep = async (step: UiCaseStepsDetailed) => {
     Object.entries(step.case_data).forEach(([detailId, val]) => {
       const id = Number(detailId)
       const detail = selectedPageStepDetails.value.find(d => d.id === id)
-      if (detail && detail.ope_key && OPE_PARAM_KEYS[detail.ope_key]) {
-        const paramKey = OPE_PARAM_KEYS[detail.ope_key]
+      if (detail && canOverride(detail.ope_key)) {
+        const paramKey = OPE_PRIMARY_PARAM[detail.ope_key]
         if (val && typeof val === 'object') {
           caseOverrides[id] = (val as any)[paramKey]
         } else {
@@ -571,14 +555,14 @@ const handleSubmit = async (done: (closed: boolean) => void) => {
     if (value !== undefined && value !== null && value !== '') {
       const id = Number(detailId)
       const detail = selectedPageStepDetails.value.find(d => d.id === id)
-      if (detail && detail.ope_key && OPE_PARAM_KEYS[detail.ope_key]) {
-        const paramKey = OPE_PARAM_KEYS[detail.ope_key]
-        
+      if (detail && canOverride(detail.ope_key)) {
+        const paramKey = OPE_PRIMARY_PARAM[detail.ope_key]
+
         let finalValue: any = value
-        if (detail.ope_key === 'wait' || detail.ope_key === 'assert_count') {
+        if (OPE_NUMERIC_OVERRIDE.has(detail.ope_key)) {
           finalValue = Number(value)
         }
-        
+
         case_data[id] = { [paramKey]: finalValue }
       }
     }
@@ -642,6 +626,9 @@ const deleteStep = async (step: UiCaseStepsDetailed) => {
 const onDragEnd = async () => {
   try {
     const steps = stepData.value.map((s, idx) => ({
+      // 必须带 id：后端按 id 原地更新（不带 id 会走「全部删除后重建」，
+      // case_data 等未提交字段会被清空 —— 拖一次顺序覆盖值就全丢了）
+      id: s.id,
       page_step: s.page_step,
       case_sort: idx,
       switch_step_open_url: s.switch_step_open_url,

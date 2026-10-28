@@ -841,6 +841,60 @@ class RecorderBrowserExecTests(TestCase):
         self.assertEqual(record.status, 2)
         self.assertEqual(record.executor_name if hasattr(record, 'executor_name') else 'recorder-browser', 'recorder-browser')
 
+    def test_case_exec_applies_case_data_override(self):
+        """用例「步骤数据覆盖」必须作用于录制器通道。
+
+        此前 consumers 只把 page_step 取走，case_data 被整段丢弃 —— 默认执行器
+        （录制器浏览器）上覆盖值完全无效，是「数据覆盖没效果」的主因。
+        """
+        from ui_automation.models import UiCaseStepsDetailed, UiPageStepsDetailed
+        detail = UiPageStepsDetailed.objects.create(
+            page_step=self.page_step, step_type=0, ope_key='fill',
+            ope_value={'text': '页面默认'}, step_sort=1,
+        )
+        UiCaseStepsDetailed.objects.filter(test_case=self.case).update(
+            case_data={str(detail.id): {'text': '用例覆盖'}},
+        )
+
+        consumer, session, received, _layer = self._consumer_env()
+        async def scenario():
+            await consumer.handle_execute_test_case({
+                'case_id': self.case.id,
+                'env_config_id': self.env.id,
+                'actuator_id': 'recorder-browser',
+            }, 'alice')
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+        self._run(scenario)()
+
+        run_calls = [p for m, p in session.requests if m == 'run_steps']
+        self.assertEqual(len(run_calls), 1)
+        fill_steps = [s for s in run_calls[0]['steps'] if s['ope_key'] == 'fill']
+        self.assertEqual(len(fill_steps), 1)
+        self.assertEqual(fill_steps[0]['ope_value']['text'], '用例覆盖')
+
+        # 覆盖只在执行期生效，不写回页面步骤自身配置
+        detail.refresh_from_db()
+        self.assertEqual(detail.ope_value, {'text': '页面默认'})
+
+    def test_page_steps_result_includes_steps(self):
+        """页面步骤调试也要回填逐步结果（否则「截图」步骤的产物无处展示）。"""
+        consumer, session, received, _layer = self._consumer_env()
+        async def scenario():
+            await consumer.handle_execute_page_steps({
+                'page_step_id': self.page_step.id,
+                'env_config_id': self.env.id,
+                'actuator_id': 'recorder-browser',
+            }, 'alice')
+            if consumer._recorder_exec_task is not None:
+                await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
+        self._run(scenario)()
+
+        msg = received[-1]
+        self.assertEqual(msg.data.func_name, 'u_page_step_result')
+        self.assertEqual(len(msg.data.func_args['steps']), 1)
+        self.assertEqual(msg.data.func_args['steps'][0]['status'], 'success')
+
     def test_case_auth_upward_inherit_skips_context_switch(self):
         """未绑定步骤"向上匹配"最近绑定的登录态：绑定 A/无/B/无 的用例只在
         第 3 步切换一次上下文（注入 B），第 2/4 步沿用不清空（与执行器同语义）。"""

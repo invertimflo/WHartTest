@@ -30,6 +30,10 @@ from .models import (
 from file_management.models import FileReference
 from wharttest_django.permissions import permission_required, HasModelPermission
 from .url_utils import join_env_url
+from .step_overrides import merge_case_data
+from .variables import (
+    load_project_variables, render_variables, render_selector_variables,
+)
 from .serializers import (
     UiModuleSerializer, UiPageSerializer, UiPageDetailSerializer,
     UiElementSerializer, UiPageStepsSerializer, UiPageStepsListSerializer, UiPageStepsDetailSerializer,
@@ -818,29 +822,59 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def batch_update(self, request):
-        """批量更新用例步骤"""
+        """批量更新用例步骤（排序 / 增删）。
+
+        带 id 时按 id 原地更新，仅删除「提交列表里已不存在」的行 —— 保住主键，
+        就保住了 case_data（步骤数据覆盖）等未提交字段。
+
+        未带 id 的旧客户端：按 page_step 顺序与库中现存行一对一原地配对，同样
+        保住主键与 case_data，仅删除配不上的多余行。局限：同一页面步骤在同一
+        用例里被引用多次时无法区分是哪一行，覆盖数据可能在这两行之间互换；
+        前端已带 id，正常交互不会走到这条路径。
+        """
         test_case_id = request.data.get('test_case')
         steps = request.data.get('steps', [])
         if not test_case_id:
             return Response({'error': 'test_case 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
+
+        def _as_int(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         with transaction.atomic():
             qs = self.get_queryset().filter(test_case_id=test_case_id)
             submitted_ids = [s.get('id') for s in steps if s.get('id')]
-            # 仅删除被移除的步骤，对已提交的进行原地更新，
-            # 避免重建丢失 case_data 等未提交字段（数据填充被清空）
+            # (step_data, 待更新的实例或 None=新建)
+            plan: list[tuple[dict, object]] = []
+
             if submitted_ids:
+                bound = {inst.id: inst for inst in qs.filter(id__in=submitted_ids)}
                 qs.exclude(id__in=submitted_ids).delete()
+                for step_data in steps:
+                    plan.append((step_data, bound.get(_as_int(step_data.get('id')))))
             else:
-                qs.delete()
-            for idx, step_data in enumerate(steps):
-                step_data['test_case'] = test_case_id
-                step_data['case_sort'] = idx
-                sid = step_data.pop('id', None)
-                instance = qs.filter(id=sid).first() if sid else None
-                if instance:
-                    serializer = self.get_serializer(instance, data=step_data, partial=True)
+                # 无 id：按 page_step 顺序配对，避免「全删重建」把 case_data 清空
+                pool: dict[int, list] = {}
+                for inst in qs.order_by('case_sort', 'id'):
+                    pool.setdefault(inst.page_step_id, []).append(inst)
+                for step_data in steps:
+                    candidates = pool.get(_as_int(step_data.get('page_step'))) or []
+                    plan.append((step_data, candidates.pop(0) if candidates else None))
+                for leftovers in pool.values():
+                    for inst in leftovers:
+                        inst.delete()
+
+            for idx, (step_data, instance) in enumerate(plan):
+                data = dict(step_data)
+                data.pop('id', None)
+                data['test_case'] = test_case_id
+                data['case_sort'] = idx
+                if instance is not None:
+                    serializer = self.get_serializer(instance, data=data, partial=True)
                 else:
-                    serializer = self.get_serializer(data=step_data)
+                    serializer = self.get_serializer(data=data)
                 serializer.is_valid(raise_exception=True)
                 serializer.save()
         return Response({'message': '批量更新成功'})
@@ -1701,7 +1735,10 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
         if pre_page_step is None:
             recorder_manager.close(session_id, graceful=False)
             raise RecorderSessionError('前置步骤不存在或不属于当前项目')
-        pre_steps = _serialize_page_step_for_recorder(pre_page_step)
+        pre_steps = _serialize_page_step_for_recorder(
+            pre_page_step,
+            variables=load_project_variables(pre_page_step.project_id),
+        )
         try:
             pre_resp = session.request(
                 'run_steps', {'steps': pre_steps}, timeout=180,
@@ -1721,8 +1758,20 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
     return session_id, viewport, pre_result, warnings
 
 
-def _serialize_page_step_for_recorder(page_step: UiPageSteps) -> list[dict]:
+def _serialize_page_step_for_recorder(
+    page_step: UiPageSteps,
+    case_data: dict | None = None,
+    variables: dict | None = None,
+) -> list[dict]:
     """把页面步骤序列化为录制器可执行的动作列表（含元素定位）。
+
+    Args:
+        page_step: 待序列化的页面步骤。
+        case_data: 用例步骤的「数据覆盖」（键为步骤详情行 id）。页面步骤调试与
+            录制前置步骤不传；用例执行时由 consumers 逐组传入，与执行器通道
+            共用 ``step_overrides.merge_case_data`` 的合并语义。
+        variables: 项目公共数据变量，用于渲染 ``${{变量名}}``。语义与执行器的
+            ``DataProcessor`` 一致。
 
     上传步骤（ope_key=upload）解析附件为本地可访问路径（file_path），
     录制器 run_steps 用 setInputFiles 执行。
@@ -1755,7 +1804,17 @@ def _serialize_page_step_for_recorder(page_step: UiPageSteps) -> list[dict]:
             if detail.element.is_iframe and detail.element.iframe_locator:
                 selector['is_iframe'] = True
                 selector['iframe_locator'] = detail.element.iframe_locator
-        ope_value = dict(detail.ope_value or {})
+            if variables:
+                selector = render_selector_variables(selector, variables)
+        # 顺序：合并用例覆盖 → 变量渲染 → 上传路径解析
+        # （合并先于路径解析，用户覆盖 file_id 时也能解析出正确的本地路径）
+        ope_value = merge_case_data(
+            detail.ope_value if isinstance(detail.ope_value, dict) else {},
+            (case_data or {}).get(str(detail.id)),
+            detail.ope_key or '',
+        )
+        if variables:
+            ope_value = render_variables(ope_value, variables)
         if detail.ope_key == 'upload' and ope_value.get('file_id'):
             # 与执行器 execute-data 同规则：解析附件为本地路径
             try:
@@ -1776,6 +1835,8 @@ def _serialize_page_step_for_recorder(page_step: UiPageSteps) -> list[dict]:
             'ope_value': ope_value,
             'step_type': detail.step_type,
             'element': selector,
+            # 元素级等待（秒）：录制器在本步操作前强制等待，与执行器同语义
+            'wait_time': detail.element.wait_time if detail.element is not None else 0,
             # 与执行器 description 同源：元素名称（回退步骤描述），执行记录步骤名展示用
             'element_name': (detail.element.name if detail.element is not None else None),
             'description': detail.description or (detail.element.name if detail.element is not None else ''),

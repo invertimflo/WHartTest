@@ -126,6 +126,13 @@ class RecorderSession:
         script_path = _server_script_path()
         if not script_path.exists():
             raise RecorderSessionError(f'录制服务脚本不存在: {script_path}')
+        # recorder_server.js 依赖同目录的纯函数模块；缺文件时 node 会以
+        # MODULE_NOT_FOUND 崩溃，表现只是「录制器不可用」，很难定位。这里提前报清楚。
+        # 仅校验内置脚本（测试通过 RECORDER_SERVER_SCRIPT 指定的 stub 无此依赖）。
+        if not os.environ.get('RECORDER_SERVER_SCRIPT', '').strip():
+            runtime_module = script_path.parent / 'step_runtime.js'
+            if not runtime_module.exists():
+                raise RecorderSessionError(f'录制服务依赖模块缺失: {runtime_module}')
         if not self.skill_dir or not os.path.isdir(self.skill_dir):
             raise RecorderSessionError(f'playwright skill 目录无效: {self.skill_dir}')
 

@@ -135,8 +135,14 @@
       <a-form ref="formRef" :model="formData" :rules="rules" layout="vertical">
         <a-form-item field="step_type" :label="stepText.actionType" required>
           <a-select v-model="formData.step_type" @change="onStepTypeChange">
-            <a-option v-for="(label, value) in stepTypeLabels" :key="value" :value="Number(value)">
+            <a-option
+              v-for="(label, value) in stepTypeLabels"
+              :key="value"
+              :value="Number(value)"
+              :disabled="isStepTypeUnsupported(value)"
+            >
               {{ label }}
+              <span v-if="isStepTypeUnsupported(value)" class="unsupported-tip">（暂不支持运行）</span>
             </a-option>
           </a-select>
         </a-form-item>
@@ -476,75 +482,15 @@ import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { fileService } from '@/features/file-management/services/fileService'
-
-/** 操作参数定义 */
-interface OpeParamDef {
-  field: string
-  label: string
-  type: 'input' | 'number' | 'textarea' | 'file'
-  placeholder: string
-  required?: boolean
-  min?: number
-  max?: number
-}
-
-/** 操作方法与参数的映射 */
-const OPE_PARAMS_MAP: Record<string, OpeParamDef[]> = {
-  // 元素操作
-  fill: [{ field: 'text', label: '输入内容', type: 'input', placeholder: '请输入要填充的文本', required: true }],
-  type: [{ field: 'text', label: '输入内容', type: 'input', placeholder: '请输入要键入的文本', required: true }],
-  wait: [{ field: 'timeout', label: '等待时间(秒)', type: 'number', placeholder: '默认1', min: 0, max: 60 }],
-  screenshot: [{ field: 'name', label: '截图文件名', type: 'input', placeholder: '可选，留空自动生成' }],
-  select_option: [{ field: 'value', label: '选项值', type: 'input', placeholder: '请输入要选择的选项值', required: true }],
-  press: [{ field: 'key', label: '按键值', type: 'input', placeholder: '例如 Enter, Tab, Escape 等', required: true }],
-  upload: [{ field: 'file_id', label: '上传文件', type: 'file', placeholder: '请选择要上传的文件', required: true }],
-  goto: [{ field: 'url', label: '目标 URL', type: 'input', placeholder: '请输入完整的网页地址，例如 https://www.google.com', required: true }],
-  switch_tab: [{ field: 'value', label: '页签索引或关键字', type: 'input', placeholder: '请输入页签索引(从0开始)或URL/标题关键字', required: true }],
-  // 断言操作
-  assert_text: [{ field: 'expected', label: '期望文本', type: 'input', placeholder: '请输入期望的文本内容', required: true }],
-  assert_contain_text: [{ field: 'expected', label: '期望包含的文本', type: 'input', placeholder: '请输入期望被包含的文本', required: true }],
-  assert_value: [{ field: 'expected', label: '期望值', type: 'input', placeholder: '请输入期望的值', required: true }],
-  assert_count: [{ field: 'expected', label: '期望数量', type: 'number', placeholder: '请输入期望的元素数量', required: true, min: 0 }],
-  assert_url: [{ field: 'expected', label: '期望 URL', type: 'input', placeholder: '例如 https://example.com/dashboard', required: true }],
-  assert_title: [{ field: 'expected', label: '期望页面标题', type: 'input', placeholder: '例如 首页', required: true }],
-}
+// 操作参数表与标签统一由 constants 维护（用例步骤编辑器共用同一份，避免漂移）
+import {
+  OPE_PARAMS_MAP,
+  OPE_KEY_LABELS,
+  isStepTypeUnsupported,
+  type OpeParamDef,
+} from '../constants'
 
 /** 操作方法标签映射 */
-const OPE_KEY_LABELS: Record<string, string> = {
-  click: '点击',
-  dblclick: '双击',
-  hover: '悬停',
-  focus: '聚焦',
-  fill: '填充',
-  type: '输入',
-  clear: '清空',
-  press: '按键模拟',
-  captcha_recognize: '智能识别验证码',
-  select_option: '选择下拉',
-  check: '勾选',
-  uncheck: '取消勾选',
-  upload: '上传文件',
-  goto: '访问网页',
-  reload: '刷新页面',
-  go_back: '页面后退',
-  go_forward: '页面前进',
-  switch_tab: '切换页签',
-  wait: '等待',
-  wait_load: '等待页面加载',
-  wait_network: '等待网络空闲',
-  screenshot: '截图',
-  assert_visible: '元素可见',
-  assert_hidden: '元素隐藏',
-  assert_enabled: '元素已启用',
-  assert_disabled: '元素被禁用',
-  assert_checked: '单/复选框被选中',
-  assert_text: '文本等于',
-  assert_contain_text: '文本包含',
-  assert_value: '值等于',
-  assert_count: '数量等于',
-  assert_url: '页面URL等于',
-  assert_title: '页面标题等于',
-}
 
 /** 格式化操作值显示 */
 const formatOpeValue = (opeValue: Record<string, any>) => {
@@ -1890,4 +1836,5 @@ onUnmounted(() => {
 .hidden-file-input { display: none; }
 .upload-param-row { display: flex; align-items: center; gap: 8px; }
 .managed-file-search { margin-bottom: 12px; }
+.unsupported-tip { color: var(--color-text-3); font-size: 12px; }
 </style>

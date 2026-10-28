@@ -103,8 +103,8 @@
             </a-form-item>
           </a-col>
           <a-col :span="4">
-            <a-form-item field="locator_index" label="下标">
-              <a-input-number v-model="formData.locator_index" :min="0" placeholder="可选" />
+            <a-form-item field="locator_index" label="下标（从 0 开始）">
+              <a-input-number v-model="formData.locator_index" :min="0" placeholder="0 = 第一个" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -126,8 +126,8 @@
             </a-form-item>
           </a-col>
           <a-col :span="4">
-            <a-form-item field="locator_index_2" label="下标">
-              <a-input-number v-model="formData.locator_index_2" :min="0" placeholder="可选" />
+            <a-form-item field="locator_index_2" label="下标（从 0 开始）">
+              <a-input-number v-model="formData.locator_index_2" :min="0" placeholder="0 = 第一个" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -149,8 +149,8 @@
             </a-form-item>
           </a-col>
           <a-col :span="4">
-            <a-form-item field="locator_index_3" label="下标">
-              <a-input-number v-model="formData.locator_index_3" :min="0" placeholder="可选" />
+            <a-form-item field="locator_index_3" label="下标（从 0 开始）">
+              <a-input-number v-model="formData.locator_index_3" :min="0" placeholder="0 = 第一个" />
             </a-form-item>
           </a-col>
         </a-row>

@@ -899,6 +899,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
         groups = []
         # 与 groups 一一对应的「切换页面URL」开关（页面步骤调试恒为 True：必须先导航）
         group_switch = []
+        # 与 groups 一一对应的用例步骤「数据覆盖」（页面步骤调试无覆盖，恒为 None）
+        group_case_data = []
         project_id = 0
         if kind == 'page_steps':
             page_step = await sync_to_async(
@@ -910,6 +912,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             project_id = page_step.project_id or 0
             groups = [page_step]
             group_switch = [True]
+            group_case_data = [None]
         else:
             case = await sync_to_async(
                 UiTestCase.objects.filter(id=args.get('case_id')).first
@@ -927,6 +930,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             group_switch = [
                 True if cs.switch_step_open_url is None else bool(cs.switch_step_open_url)
                 for cs in case_steps if cs.page_step is not None
+            ]
+            # 用例步骤的「步骤数据覆盖」随组下发：录制器通道此前完全丢弃 case_data，
+            # 导致用例里配的覆盖值在默认执行器上静默无效
+            group_case_data = [
+                cs.case_data for cs in case_steps if cs.page_step is not None
             ]
             if not groups:
                 await self._recorder_exec_error(kind, args, user, '用例没有可执行的页面步骤')
@@ -1048,6 +1056,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
             message = ''
             group_index = 0
+            # 项目公共数据变量：录制器通道此前不做 ${{变量}} 替换（执行器通道早已支持），
+            # 同一份步骤在两端行为不一致。这里按项目一次性加载，逐组渲染。
+            from .variables import load_project_variables
+
+            recorder_variables = await sync_to_async(load_project_variables)(project_id)
             # 组间登录态切换与执行器同语义："向上匹配"——未绑定步骤沿用上一个
             # 已绑定步骤的登录态（不清理），仅生效登录态变化时才切换上下文
             pending_auth = getattr(groups[0], 'auth_state_id', None) if groups else None
@@ -1070,7 +1083,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                             (switch_resp or {}).get('error') or f'第 {group_index} 组切换登录态失败'
                         )
                     current_auth = pending_auth
-                steps = await sync_to_async(_serialize_page_step_for_recorder)(page_step)
+                steps = await sync_to_async(_serialize_page_step_for_recorder)(
+                    page_step,
+                    group_case_data[group_index - 1] if group_index <= len(group_case_data) else None,
+                    recorder_variables,
+                )
                 logger.info(
                     '[recorder-exec] 第 %d/%d 组执行 page_step=%s steps=%d base_url=%s',
                     group_index, len(groups), page_step.id, len(steps), group_bases[group_index - 1],
@@ -1156,24 +1173,10 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 message = f"用例执行失败: 通过 {passed_steps}/{total_steps}{page_error_note}; {message}"
             else:
                 message = f"用例执行失败: 通过 {passed_steps}/{total_steps}{page_error_note}"
-            # 汇总每组的逐步结果（录制器 run_steps 返回，含失败现场截图），
-            # 存入执行记录 step_results——与执行器路径展示对齐
-            case_step_results: list[dict] = []
-            if kind != 'page_steps':
-                for entry in all_step_results:
-                    try:
-                        step_duration = round(float(entry.get('duration') or 0), 2)
-                    except (TypeError, ValueError):
-                        step_duration = 0
-                    case_step_results.append({
-                        'step_id': f"group{entry.get('group')}_{entry.get('index')}",
-                        'status': entry.get('status') or 'success',
-                        'message': entry.get('message') or '',
-                        'description': entry.get('description') or entry.get('ope_key') or '',
-                        'duration': step_duration,
-                        'element_found': (entry.get('status') == 'success'),
-                        'screenshot': entry.get('screenshot'),
-                    })
+            # 汇总每组的逐步结果（录制器 run_steps 返回，含失败现场截图与截图步骤产物），
+            # 存入执行记录 step_results——与执行器路径展示对齐。
+            # 页面步骤调试同样回填（此前恒为 []，导致「截图」步骤的结果无处展示）。
+            case_step_results: list[dict] = self._case_step_results_payload(all_step_results)
             if kind == 'page_steps':
                 result_args = {
                     'page_step_id': groups[0].id,
@@ -1183,7 +1186,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                     'passed_steps': passed_steps,
                     'failed_steps': failed_steps,
                     'duration': duration,
-                    'steps': [],
+                    'steps': case_step_results,
                 }
                 if groups[0].id:
                     await self.update_page_step_status(

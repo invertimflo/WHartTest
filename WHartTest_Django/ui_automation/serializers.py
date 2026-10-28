@@ -14,6 +14,7 @@ from .models import (
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
     UiBatchExecutionRecord, UiAuthState,
 )
+from .step_overrides import apply_case_data_override
 
 
 def _validate_ui_file_ids(file_ids, project, user=None):
@@ -413,9 +414,33 @@ class UiTestCaseDetailSerializer(UiTestCaseSerializer):
 
 
 class UiTestCaseExecuteSerializer(UiTestCaseSerializer):
-    """测试用例执行序列化器（含完整步骤详情，用于执行器获取数据）"""
-    case_step_details = UiCaseStepsWithDetailSerializer(source='case_steps', many=True, read_only=True)
+    """测试用例执行序列化器（含完整步骤详情，用于执行器获取数据）
+
+    用例步骤的「数据覆盖」（``case_data``）在这里就合并进各步骤的 ``ope_value``，
+    执行器拿到的直接是最终参数。这样合并规则只有一份实现（``step_overrides``），
+    录制器通道调用同一个函数，两条通道不会出现语义漂移。
+
+    已合并的用例步骤带 ``case_data_applied=True`` 标记，执行器据此跳过自身的
+    二次合并（老版本 Django 不返回该标记时，执行器仍按原逻辑合并，向后兼容）。
+    """
+    case_step_details = serializers.SerializerMethodField()
     managed_files = serializers.SerializerMethodField()
+
+    def get_case_step_details(self, obj):
+        case_steps = (
+            obj.case_steps
+            .select_related('page_step')
+            .prefetch_related('page_step__step_details__element')
+            .order_by('case_sort', 'id')
+        )
+        data = UiCaseStepsWithDetailSerializer(case_steps, many=True, context=self.context).data
+        for case_step in data:
+            page_step = case_step.get('page_step') or {}
+            details = page_step.get('step_details')
+            if details:
+                apply_case_data_override(details, case_step.get('case_data'))
+            case_step['case_data_applied'] = True
+        return data
 
     def get_managed_files(self, obj):
         try:

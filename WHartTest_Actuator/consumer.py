@@ -1821,7 +1821,14 @@ class TaskConsumer:
         
         for case_step in data.get('case_step_details', []):
             page_step_data = case_step.get('page_step', {})
-            case_data_override = case_step.get('case_data') or {}
+            # 平台已把「步骤数据覆盖」合并进 ope_value（case_data_applied=True），此时
+            # 不能再合并一次 —— 合并规则的唯一实现在 Django 侧（ui_automation/step_overrides.py），
+            # 执行器只负责执行，避免两端键序漂移。老平台不返回该标记时仍按原逻辑合并，
+            # 保证新旧版本可互通（dict 合并幂等，最坏等于重复赋值）。
+            if case_step.get('case_data_applied'):
+                case_data_override = {}
+            else:
+                case_data_override = case_step.get('case_data') or {}
             if page_step_data:
                 # 「切换页面URL」开关：缺省视为开启（与模型默认值一致）
                 switch_open_url = case_step.get('switch_step_open_url')

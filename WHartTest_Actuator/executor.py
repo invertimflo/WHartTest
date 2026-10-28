@@ -95,6 +95,17 @@ class LoginStateError(RuntimeError):
 #                  页面导航后若命中被判定为登录页，抛出 LoginStateError 并给出明确提示。
 AUTH_CONFIG_KEYS = ("storage_state", "headers", "local_storage", "login_check")
 
+# 单个等待步骤 / 元素级等待的时长上限（秒）。
+# 防的是脏数据把用例挂死：例如接口直接写入 timeout=90（秒），旧实现按毫秒解读
+# 只是"少等"，一旦解读回来就是 90 秒；再叠加 300 的上限可兜住更大的脏值。
+MAX_WAIT_SECONDS = 300
+
+# step_type 3/4/5（自定义变量 / 条件判断 / Python代码）尚未实现运行时。
+# 文案与 Web 端下拉的「暂不支持」保持一致，避免两端提示不同让人以为是别的问题。
+STEP_TYPE_UNSUPPORTED_MESSAGE = (
+    "自定义变量 / 条件判断 / Python代码 步骤暂不支持运行，请改用其他步骤类型"
+)
+
 
 @dataclass
 class StepConfig:
@@ -1663,6 +1674,12 @@ class PlaywrightExecutor:
         if step.step_type == 10:
             return await self._execute_ai_action(page, step)
 
+        # step_type 3/4/5（自定义变量 / 条件判断 / Python代码）尚无运行时实现。
+        # 平台前端已把这三类标记为「暂不支持」并禁用，这里对历史数据给明确提示，
+        # 避免落到「未知操作类型」或静默跳过造成误判为通过。
+        if step.step_type in (3, 4, 5):
+            return False, STEP_TYPE_UNSUPPORTED_MESSAGE, None
+
         operation = (step.operation_type or '').lower()
         screenshot_path: str | None = None
         
@@ -1670,10 +1687,12 @@ class PlaywrightExecutor:
         # 注意：Playwright 自带 Auto-waiting，一般不需要手动等待
         if step.wait_time > 0:
             wait_time = step.wait_time
-            # 防呆逻辑：如果设置的时间大于 60，极有可能是毫秒，自动除以 1000 转换为秒
-            if wait_time > 60:
-                logger.warning(f"步骤 {step.step_id}: wait_time ({wait_time}) 过大，已自动转换为秒 ({wait_time / 1000:.2f}s)")
+            # 防呆：历史数据可能是毫秒。旧实现以 60 为界，会把「等待 90 秒」误判成
+            # 90 毫秒（形同不等），故阈值提高到 1000（1 秒以下不可能被当成毫秒值）。
+            if wait_time >= 1000:
+                logger.warning(f"步骤 {step.step_id}: wait_time ({wait_time}) 疑似毫秒，已转换为秒 ({wait_time / 1000:.2f}s)")
                 wait_time = wait_time / 1000
+            wait_time = min(wait_time, MAX_WAIT_SECONDS)
             
             logger.debug(f"步骤 {step.step_id}: 强制等待 {wait_time}s（建议设为0让Playwright自动等待）")
             await page.wait_for_timeout(int(wait_time * 1000))
@@ -1725,18 +1744,22 @@ class PlaywrightExecutor:
         
         # 页面操作（不需要定位器）
         def _parse_wait_timeout(value: str) -> int:
-            """解析等待时间（单位为秒，转换为毫秒。支持大于60的旧数据向下兼容）"""
+            """解析等待时间：**单位是秒**，返回毫秒。
+
+            兼容历史毫秒数据：仅当数值 >= 1000 时才判定为毫秒直接返回。旧实现以
+            60 为界，导致「等待 90 秒」被当成 90 毫秒（形同不等）；而 60 秒以内
+            是前端允许的合法秒数，不该被当成毫秒。
+            """
             if not value:
                 return 1000  # 默认 1 秒
             try:
                 val = float(value)
-                # 向下兼容：如果大于 60，判定为历史毫秒数据，直接返回
-                if val > 60:
-                    return int(val)
-                # 正常情况：秒转换为毫秒
-                return int(val * 1000)
-            except ValueError:
+            except (TypeError, ValueError):
                 return 1000
+            if val < 0:
+                return 1000
+            ms = int(val) if val >= 1000 else int(val * 1000)
+            return min(ms, MAX_WAIT_SECONDS * 1000)
 
         page_operations = {
             'goto': lambda: self._goto_with_login_check(page, step.input_value),
@@ -1752,7 +1775,18 @@ class PlaywrightExecutor:
             await page_operations[operation]()
             logger.debug(f"步骤 {step.step_id}: {operation} 耗时 {time.time() - op_start:.2f}s")
             return True, f"页面操作 {operation} 执行成功", None
-        
+
+        # 页面级断言不需要元素定位，必须放在「定位器为空」校验之前，
+        # 否则用例里不加元素的 assert_url / assert_title 会被误判为配置错误
+        page_asserts = {
+            'assert_url': lambda: expect(page).to_have_url(step.input_value or ''),
+            'assert_title': lambda: expect(page).to_have_title(step.input_value or ''),
+        }
+        if operation in page_asserts:
+            await page_asserts[operation]()
+            logger.debug(f"步骤 {step.step_id}: {operation} 耗时 {time.time() - op_start:.2f}s")
+            return True, f"断言 {operation.replace('assert_', '')} 通过", None
+
         # 元素操作（需要定位器）- 先验证定位器是否有效
         if not step.locator_value or not step.locator_value.strip():
             return False, f"元素定位器为空，请在元素管理中配置定位表达式（步骤: {step.description or step.step_id}）", None
@@ -1785,6 +1819,9 @@ class PlaywrightExecutor:
             locators_to_try.append((step.locator_type_3, step.locator_value_3, getattr(step, 'locator_index_3', None)))
 
         locator = None
+        # 未收窄（未应用 locator_index）的定位器：assert_count 统计的是「匹配到的
+        # 元素个数」，若先 nth() 收窄，计数恒为 1，断言就失去意义
+        locator_raw = None
         locator_type_used = None
         locator_value_used = None
         
@@ -1795,10 +1832,11 @@ class PlaywrightExecutor:
             logger.info(f"步骤 {step.step_id}: 尝试定位器 {idx} [{l_type}={l_value}]" + (f" 下标 {l_index}" if l_index is not None else ""))
             
             if step.is_iframe and step.iframe_locator:
-                locator_cand = self._get_locator(frame, l_type, l_value)
+                locator_cand_raw = self._get_locator(frame, l_type, l_value)
             else:
-                locator_cand = self._get_locator(page, l_type, l_value)
-                
+                locator_cand_raw = self._get_locator(page, l_type, l_value)
+
+            locator_cand = locator_cand_raw
             if l_index is not None:
                 locator_cand = locator_cand.nth(l_index)
                 
@@ -1808,6 +1846,7 @@ class PlaywrightExecutor:
                 await locator_cand.wait_for(state="visible", timeout=wait_timeout)
                 # 成功找到并可见！使用该定位器并跳出循环
                 locator = locator_cand
+                locator_raw = locator_cand_raw
                 locator_type_used = l_type
                 locator_value_used = l_value
                 logger.info(f"步骤 {step.step_id}: 定位器 {idx} [{l_type}={l_value}] 可见并被成功选中")
@@ -1817,6 +1856,7 @@ class PlaywrightExecutor:
                 # 如果是最后一个定位器，不论成败都必须保留它，以便进行下一步操作或者抛出异常
                 if idx == len(locators_to_try):
                     locator = locator_cand
+                    locator_raw = locator_cand_raw
                     locator_type_used = l_type
                     locator_value_used = l_value
 
@@ -1869,6 +1909,7 @@ class PlaywrightExecutor:
         # 断言操作
         if operation.startswith('assert_'):
             assert_type = operation.replace('assert_', '')
+            # url / title 已在页面操作段落处理（不需要元素定位，不能走到这里）
             assert_operations = {
                 'visible': lambda: expect(locator).to_be_visible(),
                 'hidden': lambda: expect(locator).to_be_hidden(),
@@ -1878,9 +1919,10 @@ class PlaywrightExecutor:
                 'text': lambda: expect(locator).to_have_text(step.input_value),
                 'value': lambda: expect(locator).to_have_value(step.input_value),
                 'contain_text': lambda: expect(locator).to_contain_text(step.input_value),
-                'url': lambda: expect(page).to_have_url(step.input_value),
-                'title': lambda: expect(page).to_have_title(step.input_value),
-                'count': lambda: expect(locator).to_have_count(int(float(step.input_value)) if step.input_value else 0),
+                # 计数用未收窄的定位器：先 nth() 再计数结果恒为 1
+                'count': lambda: expect(locator_raw or locator).to_have_count(
+                    int(float(step.input_value)) if step.input_value else 0
+                ),
             }
             if assert_type in assert_operations:
                 await assert_operations[assert_type]()
