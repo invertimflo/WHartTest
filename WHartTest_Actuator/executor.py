@@ -249,6 +249,13 @@ class PlaywrightExecutor:
         self._stop_requested = False
         self._current_trace_path: Optional[str] = None
         self._page_errors = []
+        # Trace 归属与状态：Trace 挂在「具体某个 context」上，登录态切换
+        # （ensure_auth_context）会关旧 context 换新的，旧 Trace 随之失效。
+        # 只凭 self.trace_enabled 去 stop 会抛 "Must start tracing before stopping"。
+        self._tracing_context: Optional[BrowserContext] = None  # Trace 实际启动所在的 context
+        self._tracing_active = False                           # 是否处于「已启动、未停止」状态
+        self._tracing_session = False                          # 是否处于用例级 trace 会话中
+        self._trace_name = 'trace'                             # 当前会话的 trace 文件名前缀
 
         # AI Agent 配置（用于 step_type=10「AI操作」），由 consumer 注入
         self.model_config = None
@@ -914,6 +921,11 @@ class PlaywrightExecutor:
         self._auth_config = auth
         await self._init_browser_context()
         self._auth_context_key = key
+        # 旧 context 已随重建关闭，挂在它上面的 Trace 一并失效；用例级 trace
+        # 会话仍在进行时，在新 context 上重新启动，保证 Trace 能正常落盘
+        # （切换前的那一段随旧 context 释放，无法迁移）。
+        if self._tracing_session:
+            await self._start_tracing()
         # 重建出的新页面须重新挂执行画面帧流：CDP screencast 会话随旧 context
         # 关闭而失效，不重挂会导致画布停留在重建前的最后一帧
         if self.on_execution_page is not None:
@@ -1101,6 +1113,9 @@ class PlaywrightExecutor:
         self._browser = None
         self._playwright = None
         self._page_errors = []
+        # context 即将关闭，其上的 Trace 也随之失效，不能再 stop
+        self._tracing_context = None
+        self._tracing_active = False
 
         # Prefer browser.close() which tears down contexts/pages; sequential
         # page->context->browser left orphans when an early close hung.
@@ -1134,6 +1149,64 @@ class PlaywrightExecutor:
         finally:
             await self.close()
     
+    def _build_trace_path(self, trace_name: str) -> str:
+        """生成 trace 落盘路径（含毫秒时间戳，避免同名覆盖）。"""
+        return f"{self.trace_dir}/{trace_name}_{int(time.time() * 1000)}.zip"
+
+    async def _start_tracing(self) -> bool:
+        """在当前 context 上启动 Trace。
+
+        Trace 归属于具体的 BrowserContext：context 被重建（登录态切换）后，
+        必须在新 context 上重新 start，否则最后 stop 会报
+        "Must start tracing before stopping"。启动失败只记录日志，不影响用例执行。
+        """
+        context = self._context
+        if not self.trace_enabled or context is None:
+            return False
+        try:
+            await context.tracing.start(
+                screenshots=self.trace_screenshots,
+                snapshots=self.trace_snapshots,
+                sources=self.trace_sources,
+            )
+        except Exception as e:
+            self._tracing_context = None
+            self._tracing_active = False
+            logger.error(f"启动 Trace 失败: {e}")
+            return False
+        self._tracing_context = context
+        self._tracing_active = True
+        logger.debug(
+            f"Trace 已启动: screenshots={self.trace_screenshots}, snapshots={self.trace_snapshots}"
+        )
+        return True
+
+    async def _stop_tracing(self, trace_path: str) -> Optional[str]:
+        """停止 Trace 并落盘，返回保存成功后的路径（失败 / 未启动返回 None）。
+
+        未启动、context 已被替换或已关闭时安全跳过——这些都不该让用例执行
+        失败，更不该在日志里抛 "Must start tracing before stopping"。
+        """
+        context = self._tracing_context
+        started = self._tracing_active
+        self._tracing_context = None
+        self._tracing_active = False
+
+        if not started or context is None:
+            logger.debug("Trace 未处于启动状态，跳过保存")
+            return None
+        if context is not self._context:
+            # 登录态切换重建了 context，旧 Trace 已随旧 context 释放
+            logger.warning("Trace 所在 context 已被重建（登录态切换），本次 Trace 无法保存")
+            return None
+        try:
+            Path(self.trace_dir).mkdir(parents=True, exist_ok=True)
+            await context.tracing.stop(path=trace_path)
+        except Exception as e:
+            logger.error(f"保存 Trace 失败: {e}")
+            return None
+        return trace_path
+
     @asynccontextmanager
     async def browser_session_with_trace(self, trace_name: str = 'trace'):
         """带 Trace 的浏览器会话上下文管理器
@@ -1148,17 +1221,13 @@ class PlaywrightExecutor:
             trace 文件路径（通过 self._current_trace_path 获取）
         """
         self._current_trace_path = None
+        self._trace_name = trace_name
+        self._tracing_session = bool(self.trace_enabled)
         await self.init_browser()
         
         try:
-            # 启动 Trace
-            if self.trace_enabled and self._context:
-                await self._context.tracing.start(
-                    screenshots=self.trace_screenshots,
-                    snapshots=self.trace_snapshots,
-                    sources=self.trace_sources,
-                )
-                logger.debug(f"Trace 已启动: screenshots={self.trace_screenshots}, snapshots={self.trace_snapshots}")
+            # 启动 Trace（挂在 init_browser 建出的 context 上）
+            await self._start_tracing()
 
             if self.on_execution_page is not None:
                 await self.on_execution_page(self._page)
@@ -1167,16 +1236,13 @@ class PlaywrightExecutor:
             
         finally:
             # 停止 Trace 并保存
-            if self.trace_enabled and self._context:
-                try:
-                    timestamp = int(time.time() * 1000)
-                    trace_path = f"{self.trace_dir}/{trace_name}_{timestamp}.zip"
-                    await self._context.tracing.stop(path=trace_path)
+            if self.trace_enabled:
+                trace_path = await self._stop_tracing(self._build_trace_path(trace_name))
+                if trace_path:
                     self._current_trace_path = trace_path
                     logger.info(f"Trace 已保存: {trace_path}")
-                except Exception as e:
-                    logger.error(f"保存 Trace 失败: {e}")
-            
+            self._tracing_session = False
+
             await self.close()
     
     def get_current_trace_path(self) -> Optional[str]:
@@ -1191,6 +1257,15 @@ class PlaywrightExecutor:
         """立即硬中断：置标志并关闭浏览器/上下文，使在途 Playwright 调用
         快速失败——用于前端关闭执行画布时直接终止（不用等当前步骤结束）。"""
         self._stop_requested = True
+        # 关闭 context 先前把在途 Trace 落盘：context 一旦关闭，Trace 数据就取不回来了
+        if self._tracing_active:
+            try:
+                trace_path = await self._stop_tracing(self._build_trace_path(self._trace_name))
+                if trace_path:
+                    self._current_trace_path = trace_path
+                    logger.info(f"Trace 已保存（手动中断）: {trace_path}")
+            except Exception as e:
+                logger.warning('stop_now 保存 Trace 失败: %s', e)
         try:
             await self.close()
         except Exception as e:
@@ -1206,15 +1281,43 @@ class PlaywrightExecutor:
                 logger.error(f"处理浏览器弹窗异常: {e}")
 
         def handle_pageerror(exception):
-            logger.error(f"页面 JS 抛出未捕获异常: {exception}")
-            if not hasattr(self, '_page_errors'):
+            # str(exception) 对站点脚本抛出的非 Error 值可能只有一个标识符（如 "BO"），
+            # 这里统一去空白并给兜底文案，避免日志/汇总里出现空串
+            message = str(exception).strip() or '未知页面脚本错误'
+            if not hasattr(self, '_page_errors') or self._page_errors is None:
                 self._page_errors = []
-            self._page_errors.append(str(exception))
+            repeated = self._page_errors.count(message)
+            self._page_errors.append(message)
             if len(self._page_errors) > 50:
                 self._page_errors = self._page_errors[-50:]
+            if repeated:
+                # 站点脚本循环报同一条错误时不刷 ERROR，避免淹没真正的执行日志
+                logger.debug(f"页面 JS 重复未捕获异常（第 {repeated + 1} 次）: {message}")
+            else:
+                logger.error(f"页面 JS 抛出未捕获异常: {message}")
 
         page.on("dialog", handle_dialog)
         page.on("pageerror", handle_pageerror)
+
+    def _page_error_summary(self, limit: int = 3) -> str:
+        """把本次用例捕获的页面 JS 错误汇总成可读后缀。
+
+        同一消息重复出现时合并为 `消息×次数`，避免出现
+        "(捕获 7 个页面 JS 错误: BO; BO; BO)" 这类看不出信息量的结果。
+        """
+        errors = [str(e).strip() or '未知页面脚本错误' for e in (getattr(self, '_page_errors', None) or [])]
+        if not errors:
+            return ''
+        counts: dict[str, int] = {}
+        for message in errors:
+            counts[message] = counts.get(message, 0) + 1
+        parts = []
+        for message, count in list(counts.items())[:limit]:
+            text = message if len(message) <= 120 else message[:117] + '…'
+            parts.append(f"{text}×{count}" if count > 1 else text)
+        if len(counts) > limit:
+            parts.append(f"等 {len(counts)} 类")
+        return f" (捕获 {len(errors)} 个页面 JS 错误: {'; '.join(parts)})"
 
     def _get_locator(self, container: Union[Page, FrameLocator], locator_type: str, locator_value: str):
         """根据定位类型获取元素定位器"""
@@ -2177,8 +2280,7 @@ class PlaywrightExecutor:
                 duration = time.time() - start_time
                 status = 'success' if failed_steps == 0 else 'failed'
                 message = f"用例执行{'成功' if status == 'success' else '失败'}: 通过 {passed_steps}/{total_steps}"
-                if hasattr(self, '_page_errors') and self._page_errors:
-                    message += f" (捕获 {len(self._page_errors)} 个页面 JS 错误: {'; '.join(self._page_errors[:3])})"
+                message += self._page_error_summary()
                 if getattr(self, '_last_cert_failure', None):
                     message += f" （提示：{self._last_cert_failure}）"
                 logger.info(f"✅ {message}" if status == 'success' else f"❌ {message}")
@@ -2336,13 +2438,17 @@ class PlaywrightExecutor:
         page = None
 
         try:
-            # 启动 Trace
+            # 启动 Trace（失败不影响用例执行，只是没有回放产物）
             if trace_enabled:
-                await context.tracing.start(
-                    screenshots=self.trace_screenshots,
-                    snapshots=self.trace_snapshots,
-                    sources=self.trace_sources,
-                )
+                try:
+                    await context.tracing.start(
+                        screenshots=self.trace_screenshots,
+                        snapshots=self.trace_snapshots,
+                        sources=self.trace_sources,
+                    )
+                except Exception as trace_error:
+                    trace_enabled = False
+                    logger.error(f"[并发] 启动 Trace 失败: {trace_error}")
 
             page = await context.new_page()
             page.set_default_timeout(self.action_timeout)
@@ -2471,15 +2577,20 @@ class PlaywrightExecutor:
             duration = time.time() - start_time
             status = 'success' if failed_steps == 0 else 'failed'
             message = f"用例执行{'成功' if status == 'success' else '失败'}: 通过 {passed_steps}/{total_steps}"
-            if hasattr(self, '_page_errors') and self._page_errors:
-                message += f" (捕获 {len(self._page_errors)} 个页面 JS 错误: {'; '.join(self._page_errors[:3])})"
+            message += self._page_error_summary()
             if getattr(self, '_last_cert_failure', None):
                 message += f" （提示：{self._last_cert_failure}）"
 
             # 保存 Trace
             if trace_enabled:
                 trace_path = f"{self.trace_dir}/case_{config.case_id}_{int(time.time())}.zip"
-                await context.tracing.stop(path=trace_path)
+                try:
+                    Path(self.trace_dir).mkdir(parents=True, exist_ok=True)
+                    await context.tracing.stop(path=trace_path)
+                except Exception as trace_error:
+                    # Trace 只是辅助产物：落盘失败不能把已成功的用例判成失败
+                    logger.error(f"[并发] 保存 Trace 失败: {trace_error}")
+                    trace_path = None
 
             await page.close()
 
@@ -2507,7 +2618,7 @@ class PlaywrightExecutor:
                     trace_path = f"{self.trace_dir}/case_{config.case_id}_{int(time.time())}.zip"
                     await context.tracing.stop(path=trace_path)
                 except Exception:
-                    pass
+                    trace_path = None
             try:
                 if page is not None:
                     await page.close()

@@ -30,6 +30,27 @@ RECORDER_BROWSER_ID = 'recorder-browser'
 RECORDER_BROWSER_NAME = '录制器浏览器（本地）'
 
 
+def format_page_error_note(page_errors: Optional[list[str]], limit: int = 3) -> str:
+    """把页面 JS 错误汇总成与执行器一致的文案。
+
+    同一消息重复出现时合并为 `消息×次数`，避免
+    "(捕获 7 个页面 JS 错误: BO; BO; BO)" 这类看不出信息量的结果。
+    """
+    errors = [str(e).strip() or '未知页面脚本错误' for e in (page_errors or [])]
+    if not errors:
+        return ''
+    counts: dict[str, int] = {}
+    for message in errors:
+        counts[message] = counts.get(message, 0) + 1
+    parts = []
+    for message, count in list(counts.items())[:limit]:
+        text = message if len(message) <= 120 else message[:117] + '…'
+        parts.append(f"{text}×{count}" if count > 1 else text)
+    if len(counts) > limit:
+        parts.append(f"等 {len(counts)} 类")
+    return f" (捕获 {len(errors)} 个页面 JS 错误: {'; '.join(parts)})"
+
+
 class SocketUserManager:
     """WebSocket用户管理器"""
     
@@ -1164,9 +1185,7 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 else:
                     trace_local_path = None
             # 执行日志与执行器同款格式："用例执行成功: 通过 5/5 (捕获 N 个页面 JS 错误: …)"
-            page_error_note = ''
-            if page_errors:
-                page_error_note = f" (捕获 {len(page_errors)} 个页面 JS 错误: {'; '.join(page_errors[:3])})"
+            page_error_note = format_page_error_note(page_errors)
             if status == 'success':
                 message = f"用例执行成功: 通过 {passed_steps}/{total_steps}{page_error_note}"
             elif message:
