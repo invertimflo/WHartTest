@@ -84,7 +84,6 @@
           </div>
           <div
             :class="['tool-content', 'message-render-skip', { 'collapsed': !message.isExpanded && shouldCollapse }]"
-            :key="message.content"
             data-i18n-skip
             v-html="formattedContent"
           ></div>
@@ -135,17 +134,22 @@
           </div>
           <div
             v-show="message.isThinkingExpanded"
-            :key="message.content"
             class="thinking-body message-render-skip"
             data-i18n-skip
             v-html="formattedContent"
           ></div>
         </div>
 
+        <!-- 纯文本快速渲染（流式期间）：只做文本插值，跳过 Markdown 解析 -->
+        <div
+          v-else-if="plainText && !message.isThinkingProcess && message.messageType === 'ai'"
+          class="message-render-skip plain-stream-text"
+          data-i18n-skip
+        >{{ message.content }}</div>
+
         <!-- 普通AI消息 -->
         <div
           v-else
-          :key="message.content"
           class="message-render-skip"
           :class="{ 'streaming-content': isStreamingMessage }"
           data-i18n-skip
@@ -248,10 +252,20 @@ interface ChatMessage {
 interface Props {
   message: ChatMessage;
   floatingToolImageSrc?: string | null;
+  /**
+   * 纯文本快速渲染模式。
+   *
+   * 流式输出期间，正文每秒变化几十次，若每次都走 marked + DOMParser + DOMPurify，
+   * 主线程会被历史消息 × 全文长度的重渲染占满（页面的"卡死"主因）。
+   * 打开此开关后正文只做文本插值，成本与增量长度成正比；
+   * 流式结束后由父组件用正常 Markdown 模式渲染一次最终结果。
+   */
+  plainText?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   floatingToolImageSrc: null,
+  plainText: false,
 });
 
 const { isEnglish } = useAppI18n();
@@ -699,7 +713,23 @@ const wrapCodeBlocksAsCollapsible = (html: string, isStreaming = false): string 
 };
 
 // 格式化消息内容
+// 渲染结果缓存：markdown 解析 + DOMParser 代码块包装 + DOMPurify 净化是重活，
+// 内容未变化时直接复用上次结果，避免流式 flush 期间重复计算。
+let formattedCache: { key: string; html: string } = { key: '', html: '' };
+
 const formattedContent = computed(() => {
+  const cacheKey = [
+    props.message.messageType || '',
+    props.message.isUser ? 1 : 0,
+    props.message.isStreaming ? 1 : 0,
+    props.message.isLoading ? 1 : 0,
+    props.message.content,
+  ].join('\u0001');
+  if (formattedCache.key === cacheKey) {
+    return formattedCache.html;
+  }
+
+  let html: string;
   try {
     let processedContent = props.message.content;
 
@@ -707,13 +737,16 @@ const formattedContent = computed(() => {
     if (props.message.isUser || props.message.messageType === 'human') {
       processedContent = replaceDocImgPlaceholders(processedContent);
       if (MARKDOWN_IMAGE_RE.test(processedContent)) {
-        return renderSafeMarkdown(processedContent);
+        html = renderSafeMarkdown(processedContent);
+        formattedCache = { key: cacheKey, html };
+        return html;
       }
 
       // 转义HTML标签，使其显示为文本
       processedContent = escapeHtml(processedContent);
       // 将换行符转换为<br>标签，保持换行
       processedContent = processedContent.replace(/\n/g, '<br>');
+      formattedCache = { key: cacheKey, html: processedContent };
       return processedContent;
     }
 
@@ -740,14 +773,17 @@ const formattedContent = computed(() => {
     }
 
     // 使用DOMPurify净化HTML防止XSS攻击
-    return DOMPurify.sanitize(htmlContent, {
+    html = DOMPurify.sanitize(htmlContent, {
       ADD_TAGS: ['img', 'details', 'summary'],
       ADD_ATTR: ['src', 'alt', 'title', 'class'],
     });
   } catch (error) {
     console.error('Error parsing markdown:', error);
-    return props.message.content;
+    html = props.message.content;
   }
+
+  formattedCache = { key: cacheKey, html };
+  return html;
 });
 
 const scrollStreamingCodePreviewToBottom = () => {
@@ -848,7 +884,14 @@ const handleStreamingMarkdown = (content: string) => {
 
 
 // 格式化工具消息
+const MAX_TOOL_FORMAT_CHARS = 200_000;
 const formatToolMessage = (content: string) => {
+  // 超大工具输出（如截图 base64、批量 JSON）直接跳过解析：
+  // 对这类内容做 JSON.parse + 递归格式化会长时间阻塞主线程，与流式渲染叠加即表现为页面卡死。
+  if (typeof content === 'string' && content.length > MAX_TOOL_FORMAT_CHARS) {
+    return `\`\`\`\n${content.slice(0, 20000)}\n\`\`\`\n\n> 内容过长（共 ${content.length} 字符），已截断展示。`;
+  }
+
   const parsedPayload = parseToolResultDisplayPayload(content);
   if (parsedPayload.fileAttachments.length > 0 || parsedPayload.imageDataUrl) {
     if (parsedPayload.content && parsedPayload.content.trim()) {
@@ -1570,6 +1613,34 @@ const formatToolMessage = (content: string) => {
   border-left: 3px solid #00b42a;
   background: linear-gradient(90deg, rgba(0, 180, 42, 0.05) 0%, transparent 20%);
   padding-left: 8px;
+}
+
+/*
+ * 纯文本快速渲染（流式期间）：
+ * 保留换行与空格，字体与正文一致，并复用流式绿边与光标，视觉上与 Markdown 模式衔接自然。
+ */
+.plain-stream-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  position: relative;
+  border-left: 3px solid #00b42a;
+  background: linear-gradient(90deg, rgba(0, 180, 42, 0.05) 0%, transparent 20%);
+  padding-left: 8px;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.plain-stream-text::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background-color: #00b42a;
+  margin-left: 2px;
+  animation: blink 1s infinite;
+  vertical-align: text-bottom;
 }
 
 .streaming-content::after {

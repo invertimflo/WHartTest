@@ -284,6 +284,48 @@ logger = logging.getLogger(__name__)  # Initialize logger
 
 
 # --- 辅助函数 ---
+def _env_number(name, default, cast=float, minimum=None):
+    """读取数值型环境变量，非法值回退默认。"""
+    import os
+
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid env %s=%s, fallback=%s", name, raw, default)
+        return default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
+def _build_llm_timeout(request_timeout):
+    """把单一的请求超时拆成 httpx 的分项超时。
+
+    流式场景下 `read` 表示「两次数据到达之间的最大空闲时间」，而思考型模型
+    （如 qwen3 系列）在首个 token 之前可能静默 1~5 分钟，用统一的 120s 超时
+    必然误杀，然后触发重试从头生成，用户侧表现为长时间卡住后报错。
+
+    因此：连接超时要短（快速失败），读超时要长（容纳思考），写超时中等。
+    """
+    import httpx
+
+    connect = _env_number("LLM_CONNECT_TIMEOUT", 10.0, float, 1.0)
+    read = _env_number(
+        "LLM_READ_TIMEOUT", max(float(request_timeout or 0), 300.0), float, 10.0
+    )
+    write = _env_number("LLM_WRITE_TIMEOUT", 60.0, float, 5.0)
+    pool = _env_number("LLM_POOL_TIMEOUT", connect, float, 1.0)
+
+    try:
+        return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+    except Exception:  # noqa: BLE001 - 极端情况下回退为单一数值
+        logger.warning("Failed to build httpx.Timeout, fallback to read timeout=%ss", read)
+        return read
+
+
 def create_llm_instance(active_config, temperature=0.7):
     """
     根据配置创建LLM实例
@@ -293,16 +335,25 @@ def create_llm_instance(active_config, temperature=0.7):
     - qwen: ChatQwen（阿里云百炼通义千问）
 
     关键参数说明：
-    - timeout: 请求超时时间（秒），防止无限期等待
-    - max_retries: 最大重试次数，处理临时网络问题
+    - timeout: 分项超时（connect/read/write/pool），流式下 read 决定「最长静默时间」
+    - max_retries: 客户端重试次数。默认 0，重试职责统一交给
+      ModelRetryMiddleware，避免 "客户端 3 次 × 中间件 3 次 = 9 次" 的叠乘放大。
     """
     model_identifier = active_config.name or "gpt-3.5-turbo"
     provider = (getattr(active_config, "provider", None) or "openai_compatible").strip()
 
     # 从配置获取超时设置，默认120秒（LLM响应可能较慢）
     request_timeout = getattr(active_config, "request_timeout", None) or 120
-    # 重试次数，默认3次
-    max_retries = getattr(active_config, "max_retries", None) or 3
+    timeout_value = _build_llm_timeout(request_timeout)
+
+    # 客户端重试上限：默认 0，把重试交给中间件（中间件可按错误类型与
+    # 是否已产出 token 做更精细的判定）
+    client_retry_cap = _env_number("LLM_CLIENT_MAX_RETRIES", 0, int, 0)
+    db_retries = getattr(active_config, "max_retries", None)
+    if db_retries is None:
+        max_retries = client_retry_cap
+    else:
+        max_retries = min(int(db_retries), client_retry_cap)
 
     base_url = (active_config.api_url or "").strip() or None
     if provider == "deepseek" and base_url and base_url.rstrip("/") == "https://api.deepseek.com":
@@ -321,7 +372,7 @@ def create_llm_instance(active_config, temperature=0.7):
             llm_kwargs = {
                 "model": model_identifier,
                 "temperature": temperature,
-                "timeout": request_timeout,
+                "timeout": timeout_value,
                 "max_retries": max_retries,
             }
             if api_key:
@@ -341,7 +392,7 @@ def create_llm_instance(active_config, temperature=0.7):
             llm_kwargs = {
                 "model": model_identifier,
                 "temperature": temperature,
-                "timeout": request_timeout,
+                "timeout": timeout_value,
                 "max_retries": max_retries,
             }
             if api_key:
@@ -349,7 +400,15 @@ def create_llm_instance(active_config, temperature=0.7):
             if base_url:
                 llm_kwargs["base_url"] = base_url
 
-            llm = ChatQwen(**llm_kwargs)
+            try:
+                llm = ChatQwen(**llm_kwargs)
+            except TypeError:
+                # 兼容旧版 ChatQwen：timeout 只接受数值，退化为单一超时
+                logger.warning(
+                    "ChatQwen 不接受 httpx.Timeout，回退为单一超时 %ss", request_timeout
+                )
+                llm_kwargs["timeout"] = request_timeout
+                llm = ChatQwen(**llm_kwargs)
         else:
             if provider != "openai_compatible":
                 logger.warning(
@@ -360,17 +419,17 @@ def create_llm_instance(active_config, temperature=0.7):
                 "temperature": temperature,
                 "api_key": api_key,
                 "base_url": base_url,
-                "timeout": request_timeout,  # 单次请求超时
-                "max_retries": max_retries,  # 自动重试次数
+                "timeout": timeout_value,  # 分项超时：connect/read/write/pool
+                "max_retries": max_retries,  # 客户端重试（默认交给中间件，故为 0）
             }
             llm = ChatOpenAI(**llm_kwargs)
 
         logger.info(
-            "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%ss, max_retries=%s",
+            "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%s, max_retries=%s",
             provider,
             model_identifier,
             base_url,
-            request_timeout,
+            timeout_value,
             max_retries,
         )
     except Exception as e:

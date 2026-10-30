@@ -14,7 +14,7 @@
       </button>
     </div>
 
-    <div v-if="messages.length === 0" class="empty-chat">
+    <div v-if="messages.length === 0 && !stream" class="empty-chat">
       <div class="empty-icon">
         <img :src="brandLogoUrl" alt="" class="empty-logo" />
       </div>
@@ -22,9 +22,29 @@
     </div>
 
     <MessageItem
-      v-for="(message, index) in messages"
-      :key="index"
+      v-for="message in messages"
+      :key="keyOf(message)"
+      v-memo="memoOf(message)"
       :message="message"
+      :floating-tool-image-src="floatingToolImageSrc"
+      @toggle-expand="$emit('toggle-expand', $event)"
+      @quote="$emit('quote', $event)"
+      @retry="$emit('retry', $event)"
+      @delete="$emit('delete', $event)"
+      @preview-diagram="$emit('preview-diagram', $event)"
+      @preview-html="$emit('preview-html', $event)"
+      @tool-image-detected="$emit('tool-image-detected', $event)"
+      @float-tool-image="$emit('float-tool-image', $event)"
+    />
+
+    <!--
+      流式气泡独立渲染单元：不再混进 messages 数组，
+      因此流式高频更新不会触发历史消息重渲染。
+    -->
+    <StreamingBubble
+      v-if="stream"
+      :stream="stream"
+      :show-user-message="messages.length === 0"
       :floating-tool-image-src="floatingToolImageSrc"
       @toggle-expand="$emit('toggle-expand', $event)"
       @quote="$emit('quote', $event)"
@@ -41,6 +61,8 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import MessageItem from './MessageItem.vue';
+import StreamingBubble from './StreamingBubble.vue';
+import type { StreamLike } from './StreamingBubble.vue';
 import { brandLogoUrl } from '@/utils/assetUrl';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import type { FileAsset } from '@/features/file-management/types';
@@ -77,12 +99,23 @@ interface Props {
   floatingToolImageSrc?: string | null;
   hasMore?: boolean; // 🆕 是否还有更多历史消息
   isLoadingMore?: boolean; // 🆕 是否正在加载更多历史消息
+  /** 当前会话的流式状态（由 StreamingBubble 独立渲染，不参与 messages 列表） */
+  stream?: StreamLike | null;
+  /**
+   * 页面是否处于激活态。
+   * 组件被 keep-alive 缓存后，切到别的页面时 DOM 已脱离文档，
+   * 但响应式更新仍会触发重渲染与 rAF 自动滚动 —— 纯属浪费。
+   * 关闭后不再排队滚动，切回来时由父组件主动 scrollToBottom。
+   */
+  active?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
   floatingToolImageSrc: null,
   hasMore: false,
   isLoadingMore: false,
+  stream: null,
+  active: true,
 });
 const { isEnglish } = useAppI18n();
 const text = computed(() => (
@@ -114,6 +147,49 @@ const emit = defineEmits<{
 const messagesContainer = ref<HTMLElement | null>(null);
 const userIsScrolling = ref(false); // 用户是否正在查看历史消息
 let scrollTimeout: number | null = null;
+
+/**
+ * 稳定列表 key。
+ *
+ * 历史消息由父组件 `messages.value.filter()` 产出，对象引用稳定 → WeakMap 命中，
+ * 流式 flush 时不会因为数组重建而触发 DOM 销毁/重建。
+ * 流式尾部消息的对象每次都会重建，单独给一个固定 key，交给 Vue 原地 patch。
+ */
+const keyCache = new WeakMap<object, string>();
+let keySeq = 0;
+const keyOf = (message: ChatMessage): string => {
+  if (message.isStreaming || message.isLoading) return '__stream_tail__';
+  if (message.messageType === 'tool' && message.isExpanded !== undefined) {
+    // 工具消息可能随流式刷新被重建，用内容指纹兜底，避免整块 DOM 反复重建
+    return `__tool_${message.time}_${message.toolName || ''}`;
+  }
+  const cached = keyCache.get(message);
+  if (cached) return cached;
+  const generated = `msg_${++keySeq}`;
+  keyCache.set(message, generated);
+  return generated;
+};
+
+/**
+ * 重渲染阻断：只有这些字段变化时才需要重新渲染该条消息。
+ * 等价于 shouldComponentUpdate，避免流式 flush 时历史消息全量重渲染。
+ */
+const memoOf = (message: ChatMessage): unknown[] => [
+  message.content,
+  message.isUser,
+  message.time,
+  message.isLoading,
+  message.messageType,
+  message.toolName,
+  message.isExpanded,
+  message.isStreaming,
+  message.isThinkingExpanded,
+  message.stepNumber,
+  message.maxSteps,
+  message.stepStatus,
+  message.imageDataUrl,
+  message.fileAttachments,
+];
 
 // 检测用户是否在底部附近
 const isNearBottom = (): boolean => {
@@ -158,25 +234,34 @@ const handleScroll = () => {
   }
 };
 
-// 监听消息数量变化，只在用户未主动滚动时自动滚动
-watch(() => props.messages.length, () => {
-  if (!userIsScrolling.value) {
-    scrollToBottom();
-  }
-});
+// 自动滚动：合并到一帧内执行，避免每个流式 flush 都触发一次强制布局
+let scrollRafId = 0;
+const scheduleScrollToBottom = () => {
+  // 页面不在前台时不做无意义的滚动（keep-alive 下 DOM 已脱离视口）
+  if (!props.active || userIsScrolling.value || scrollRafId) return;
+  scrollRafId = requestAnimationFrame(() => {
+    scrollRafId = 0;
+    void scrollToBottom();
+  });
+};
 
-// 监听流式消息内容变化，只在用户未主动滚动时自动滚动
-watch(() => {
-  // 找到最后一条正在流式输出的消息
-  const lastMessage = props.messages[props.messages.length - 1];
-  if (lastMessage && lastMessage.isStreaming && lastMessage.messageType === 'ai') {
-    return lastMessage.content;
-  }
-  return null;
-}, (newContent) => {
-  // 只有当内容确实发生变化且用户未主动滚动时才滚动
-  if (newContent !== null && !userIsScrolling.value) {
-    scrollToBottom();
+// 历史消息数量变化
+watch(() => props.messages.length, scheduleScrollToBottom);
+
+// 流式正文增量（StreamingBubble 渲染的内容）
+watch(() => props.stream?.content, scheduleScrollToBottom);
+
+// 流式过程中新增的工具 / 步骤消息
+watch(() => props.stream?.messages?.length, scheduleScrollToBottom);
+
+// 从后台切回前台时补一次定位
+watch(() => props.active, (active) => {
+  if (active) {
+    if (scrollRafId) {
+      cancelAnimationFrame(scrollRafId);
+      scrollRafId = 0;
+    }
+    void scrollToBottom();
   }
 });
 
@@ -195,6 +280,10 @@ onUnmounted(() => {
   if (scrollTimeout !== null) {
     clearTimeout(scrollTimeout);
   }
+  if (scrollRafId) {
+    cancelAnimationFrame(scrollRafId);
+    scrollRafId = 0;
+  }
 });
 
 // 暴露滚动方法和容器DOM引用给父组件
@@ -212,6 +301,16 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+/*
+ * 轻量「窗口化」：视口外的历史消息跳过渲染与布局计算。
+ * 不引入虚拟列表依赖，浏览器不支持时自动降级为普通渲染。
+ * 排除最后一条，避免流式消息（高度持续变化）出现高度抖动。
+ */
+.chat-messages > *:not(:last-child) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
 .load-more-container {

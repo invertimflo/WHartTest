@@ -5,6 +5,8 @@ LangGraph Checkpointer 工厂模块
 - sqlite: 使用 SqliteSaver/AsyncSqliteSaver（默认，本地开发）
 - postgres: 使用 PostgresSaver/AsyncPostgresSaver（生产环境）
 """
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
@@ -14,6 +16,19 @@ from wharttest_django.data_variant import (
     get_checkpoint_sqlite_path,
     get_postgres_db_name,
 )
+
+logger = logging.getLogger(__name__)
+
+# 进程级共享 checkpointer 状态。
+# 注意：连接池绑定事件循环，因此用 "loop" 字段记录归属 loop，变更时整体重建。
+_SHARED_CHECKPOINTER = {
+    "saver": None,
+    "pool": None,
+    "loop": None,
+    "setup_done": False,
+}
+# Python 3.10+ 的 asyncio.Lock 不再绑定创建时的 loop，可安全地模块级创建
+_SHARED_CHECKPOINTER_LOCK = asyncio.Lock()
 
 
 def get_database_type() -> str:
@@ -44,22 +59,139 @@ def get_sqlite_path() -> str:
 async def get_async_checkpointer():
     """
     获取异步 Checkpointer 的上下文管理器
-    
+
     用法:
         async with get_async_checkpointer() as checkpointer:
             # 使用 checkpointer
+
+    实现说明（性能优化）：
+    - 默认使用**进程级共享**的 AsyncConnectionPool + AsyncPostgresSaver，
+      避免每个对话请求都新建 PG 连接、并重复执行 `setup()` 建表 DDL。
+    - Checkpointer 的每个读写操作都会独立 check-out 连接，多任务并发安全；
+      原先的 `from_conn_string` 是单连接，高并发时会互相排队。
+    - 连接池绑定当前事件循环，检测到 loop 变更（reload / 测试 / 多线程 ASGI）
+      时会整体重建，避免 "attached to a different loop" 错误。
+    - 任何初始化异常都会回退到"每请求单连接"的原始行为，保证可用性。
+    - `AGENT_CHECKPOINTER_SHARED=0` 可强制回到原始行为。
     """
     conn_string = get_db_connection_string()
-    
-    if get_database_type() == 'postgres':
+
+    if get_database_type() != "postgres" or not _is_shared_checkpointer_enabled():
+        async with _create_per_request_checkpointer(conn_string) as checkpointer:
+            yield checkpointer
+        return
+
+    try:
+        checkpointer = await _ensure_shared_checkpointer(conn_string)
+    except Exception as exc:  # noqa: BLE001 - 共享池失败必须能降级
+        logger.warning(
+            "[Checkpointer] 共享连接池初始化失败，回退到单连接模式: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        async with _create_per_request_checkpointer(conn_string) as fallback:
+            yield fallback
+        return
+
+    yield checkpointer
+
+
+def _is_shared_checkpointer_enabled() -> bool:
+    raw = os.environ.get("AGENT_CHECKPOINTER_SHARED", "1")
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
+
+@asynccontextmanager
+async def _create_per_request_checkpointer(conn_string: str):
+    """原始实现：每个请求新建连接并执行 setup()（共享池不可用时的回退路径）。"""
+    if get_database_type() == "postgres":
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
         async with AsyncPostgresSaver.from_conn_string(conn_string) as checkpointer:
             await checkpointer.setup()
             yield checkpointer
     else:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
         async with AsyncSqliteSaver.from_conn_string(conn_string) as checkpointer:
             yield checkpointer
+
+
+async def _ensure_shared_checkpointer(conn_string: str):
+    """懒初始化进程级共享 checkpointer（必须在运行中的事件循环内调用）。"""
+    loop = asyncio.get_running_loop()
+    state = _SHARED_CHECKPOINTER
+
+    if state["saver"] is not None and state["loop"] is loop:
+        return state["saver"]
+
+    async with _SHARED_CHECKPOINTER_LOCK:
+        # 双重检查：可能在等待锁期间已被其它任务初始化完成
+        if state["saver"] is not None and state["loop"] is loop:
+            return state["saver"]
+
+        if state["saver"] is not None and state["loop"] is not loop:
+            logger.info("[Checkpointer] 事件循环已变更，重建共享连接池")
+            await _close_shared_checkpointer()
+
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+        pool_size = max(1, int(os.environ.get("AGENT_CHECKPOINTER_POOL_SIZE", "10")))
+        pool_timeout = float(os.environ.get("AGENT_CHECKPOINTER_POOL_TIMEOUT", "10"))
+
+        pool = AsyncConnectionPool(
+            conn_string,
+            open=False,
+            max_size=pool_size,
+            timeout=pool_timeout,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+        )
+        await pool.open(wait=True, timeout=pool_timeout)
+
+        saver = AsyncPostgresSaver(pool)
+
+        if not state["setup_done"]:
+            # setup() 是幂等 DDL；用会话级 advisory lock 串行化多进程首次初始化
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(hashtext('langgraph_checkpoint_setup'))"
+                )
+                try:
+                    await saver.setup()
+                finally:
+                    await conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext('langgraph_checkpoint_setup'))"
+                    )
+            state["setup_done"] = True
+            logger.info("[Checkpointer] 共享 checkpointer 初始化完成 (pool_size=%d)", pool_size)
+
+        state.update({"saver": saver, "pool": pool, "loop": loop})
+        return saver
+
+
+async def _close_shared_checkpointer() -> None:
+    """关闭共享连接池（事件循环变更或应用关闭时调用）。"""
+    state = _SHARED_CHECKPOINTER
+    pool = state.get("pool")
+    state.update({"saver": None, "pool": None, "loop": None})
+    if pool is not None:
+        try:
+            await pool.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Checkpointer] 关闭共享连接池失败: %s", exc)
+
+
+async def close_shared_checkpointer() -> None:
+    """对外暴露的关闭入口，供 ASGI 关闭/测试清理使用。"""
+    async with _SHARED_CHECKPOINTER_LOCK:
+        await _close_shared_checkpointer()
 
 
 @contextmanager

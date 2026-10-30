@@ -151,14 +151,33 @@ INSTALLED_APPS = [
 # 指定 ASGI 入口，支持 WebSocket。
 ASGI_APPLICATION = "wharttest_django.asgi.application"
 
-# Channels Layer 配置（使用内存后端，生产环境建议使用 Redis）
-# 配置 Channels 通道层后端。
-CHANNEL_LAYERS = {
-    "default": {
-        # 使用内存通道层（适合开发/单进程场景）。
-        "BACKEND": "channels.layers.InMemoryChannelLayer"
+# Channels Layer 配置
+# 默认使用内存后端（单进程）。使用 uvicorn 多 worker / 多副本部署时，
+# 必须通过 CHANNEL_LAYER_BACKEND=redis 切到 Redis，否则跨进程的
+# WebSocket 广播失效（InMemoryChannelLayer 只在单进程内可见）。
+_CHANNEL_LAYER_BACKEND = (os.environ.get("CHANNEL_LAYER_BACKEND") or "memory").strip().lower()
+
+if _CHANNEL_LAYER_BACKEND == "redis":
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [
+                    os.environ.get("REDIS_URL")
+                    or os.environ.get("CELERY_BROKER_URL")
+                    or "redis://127.0.0.1:6379/0"
+                ],
+                "capacity": int(os.environ.get("CHANNEL_LAYER_CAPACITY", "2000")),
+                "expiry": int(os.environ.get("CHANNEL_LAYER_EXPIRY", "30")),
+            },
+        }
     }
-}
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer"
+        }
+    }
 
 # 配置请求处理中间件执行链。
 MIDDLEWARE = [

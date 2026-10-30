@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -72,7 +73,25 @@ from .loop_guard import (
     truncate_tool_content,
 )
 from .playwright_instructions import PLAYWRIGHT_SCRIPT_INSTRUCTION
-from .stop_signal import should_stop, clear_stop_signal
+from .sse_guard import guarded_sse
+from .stop_signal import aclear_stop_signal, ashould_stop, aset_stop_signal
+from .stream_progress import clear_stream_emitted, mark_stream_emitted
+
+
+def _offload(func, *args, **kwargs):
+    """在不占用「敏感线程」的线程池中执行同步函数。
+
+    `sync_to_async` 默认 `thread_sensitive=True`，会把**整个进程**内所有请求的
+    同步调用串行到同一个线程上执行。对纯读取、纯计算、纯网络构造类函数改用
+    `thread_sensitive=False`，可以真正并行，避免一个慢查询把其它会话的流式输出
+    一起卡住。
+
+    约束：被 offload 的函数不得依赖调用方线程上的数据库连接、事务或
+    延迟关联查询（例如传入未求值的 QuerySet 并在内部惰性求值）。
+    """
+    return sync_to_async(func, thread_sensitive=False)(*args, **kwargs)
+
+
 from langgraph_integration.models import ChatSession, LLMConfig
 from langgraph_integration.views import (
     _extract_requirement_doc_images_for_message,
@@ -95,6 +114,33 @@ from requirements.context_limits import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ============== LLM 配置短缓存 ==============
+# 每条对话都要读一次 is_active 的 LLMConfig，属于纯热路径读。
+# 加一层 30s TTL 缓存，并在模型保存时失效，既减连接压力又不影响配置生效速度。
+_LLM_CONFIG_CACHE_TTL = _get_env_float("LLM_CONFIG_CACHE_TTL", 30.0, min_value=0.0)
+_llm_config_cache: Dict[str, Any] = {"value": None, "expires_at": 0.0}
+
+
+def _invalidate_llm_config_cache() -> None:
+    _llm_config_cache["value"] = None
+    _llm_config_cache["expires_at"] = 0.0
+
+
+def _load_active_llm_config():
+    """读取当前激活的 LLM 配置（带短 TTL 进程内缓存）。
+
+    注意：本函数应在 `_offload` 中调用，返回的是 ORM 实例，调用方只做属性读取。
+    """
+    now = time.monotonic()
+    if _llm_config_cache["value"] is not None and now < _llm_config_cache["expires_at"]:
+        return _llm_config_cache["value"]
+
+    config = LLMConfig.objects.get(is_active=True)
+    _llm_config_cache["value"] = config
+    _llm_config_cache["expires_at"] = now + _LLM_CONFIG_CACHE_TTL
+    return config
 
 
 def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
@@ -1055,17 +1101,17 @@ class AgentLoopStreamAPIView(View):
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
         try:
-            attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
-            llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
+            attached_files = await _offload(validate_file_ids)(file_ids, project, request.user)
+            llm_attachment_context = await _offload(build_llm_attachment_context)(attached_files)
             if file_ids:
                 await sync_to_async(sync_file_references)(file_ids, project, FileReference.REF_LLM_CHAT, session_id, request.user)
         except Exception as exc:
             yield create_sse_data({"type": "error", "message": f"附件校验失败: {exc}"})
             return
 
-        # 1. 获取 LLM 配置
+        # 1. 获取 LLM 配置（进程内短 TTL 缓存，避免每个请求都打一次库）
         try:
-            active_config = await sync_to_async(LLMConfig.objects.get)(is_active=True)
+            active_config = await _offload(_load_active_llm_config)()
             logger.info(f"AgentLoopStreamAPI: Using LLM config: {active_config.name}")
             context_limit = active_config.context_limit or 128000
             model_name = active_config.name or "gpt-4o"
@@ -1114,8 +1160,8 @@ class AgentLoopStreamAPIView(View):
             return
 
         try:
-            # 3. 初始化 LLM
-            llm = await sync_to_async(create_llm_instance)(
+            # 3. 初始化 LLM（纯客户端构造，可并行，无需占用敏感线程）
+            llm = await _offload(create_llm_instance)(
                 active_config, temperature=0.7
             )
             context_limit = resolve_runtime_context_limit(
@@ -1125,9 +1171,10 @@ class AgentLoopStreamAPIView(View):
             # 4. 加载 MCP 工具
             tools: List[Any] = []
             try:
-                active_mcp_configs = await sync_to_async(list)(
-                    RemoteMCPConfig.objects.filter(is_active=True)
-                )
+                # 注意：QuerySet 必须在目标线程内构造与求值，不能跨线程传惰性对象
+                active_mcp_configs = await _offload(
+                    lambda: list(RemoteMCPConfig.objects.filter(is_active=True))
+                )()
                 if active_mcp_configs:
                     client_config = {}
                     for cfg in active_mcp_configs:
@@ -1175,7 +1222,7 @@ class AgentLoopStreamAPIView(View):
                     from knowledge.langgraph_integration import create_knowledge_tool
 
                     logger.info(f"AgentLoopStreamAPI: 正在创建知识库工具...")
-                    kb_tool = await sync_to_async(create_knowledge_tool)(
+                    kb_tool = await _offload(create_knowledge_tool)(
                         knowledge_base_id=knowledge_base_id, user=request.user
                     )
                     tools.append(kb_tool)
@@ -1195,7 +1242,7 @@ class AgentLoopStreamAPIView(View):
             # 6. 添加内置工具（Playwright 脚本管理等）
             from orchestrator_integration.builtin_tools import get_builtin_tools
 
-            builtin_tools = get_builtin_tools(
+            builtin_tools = await _offload(get_builtin_tools)(
                 user_id=request.user.id,
                 project_id=int(project_id),
                 test_case_id=test_case_id,
@@ -1283,7 +1330,7 @@ class AgentLoopStreamAPIView(View):
             # 12. 创建 Agent（LangChain v1 统一路径）
             async with get_async_checkpointer() as checkpointer:
                 # 获取中间件（需要同步到异步，因为内部有 ORM 查询）
-                middleware = await sync_to_async(get_middleware_from_config)(
+                middleware = await _offload(get_middleware_from_config)(
                     active_config,
                     llm,
                     user=request.user,
@@ -1348,15 +1395,17 @@ class AgentLoopStreamAPIView(View):
 
                 # 15.1 清理上一轮可能残留的守卫事件，避免污染本轮
                 _drain_loop_guard_events(session_id)
+                # 复位"本轮已下发 token"标记，避免上一轮的残留影响重试判定
+                clear_stream_emitted(session_id)
 
                 try:
                     async for stream_mode, chunk in agent.astream(
                         input_messages, config=invoke_config, stream_mode=stream_modes
                     ):
-                        # 检查用户停止信号
-                        if should_stop(session_id):
+                        # 检查用户停止信号（异步读取，支持 redis 后端下的多 worker）
+                        if await ashould_stop(session_id):
                             user_stopped = True
-                            clear_stop_signal(session_id)
+                            await aclear_stop_signal(session_id)
                             logger.info(
                                 f"AgentLoopStreamAPI: Stop signal received at step {step_count}"
                             )
@@ -1390,6 +1439,16 @@ class AgentLoopStreamAPIView(View):
                                             or "检测到重复工具调用，已注入纠偏提示",
                                             "tool": guard_event.get("tool"),
                                             "count": guard_event.get("count"),
+                                        }
+                                    )
+                                elif guard_event.get("kind") == "stream_reset":
+                                    # 模型在已输出部分内容后失败并重试：
+                                    # 通知前端丢弃残缺内容，避免出现重复文本
+                                    yield create_sse_data(
+                                        {
+                                            "type": "stream_reset",
+                                            "message": guard_event.get("message")
+                                            or "模型输出中断，正在重新生成…",
                                         }
                                     )
 
@@ -1500,7 +1559,7 @@ class AgentLoopStreamAPIView(View):
 
                                 if action_requests:
                                     # 获取用户工具偏好，为 always_reject 的工具添加 auto_reject 标记
-                                    user_approvals = await sync_to_async(
+                                    user_approvals = await _offload(
                                         get_user_tool_approvals
                                     )(request.user, session_id)
                                     for ar in action_requests:
@@ -1665,11 +1724,14 @@ class AgentLoopStreamAPIView(View):
                                 # 只发送模型节点产出的正文：过滤 ToolMessage、
                                 # 中间件节点以及守卫注入的纠偏/中止消息
                                 if _is_streamable_token(token, metadata):
+                                    # 记录"本轮已下发 token"，供重试去重判定
+                                    mark_stream_emitted(session_id)
                                     yield create_sse_data(
                                         {"type": "stream", "data": token.content}
                                     )
                             elif _is_streamable_token(chunk, None):
                                 # 兼容旧版本可能直接返回 message 的情况
+                                mark_stream_emitted(session_id)
                                 yield create_sse_data(
                                     {"type": "stream", "data": chunk.content}
                                 )
@@ -1726,8 +1788,10 @@ class AgentLoopStreamAPIView(View):
                     )
 
                     # 获取当前上下文 token 使用量（优先 usage_metadata，回退估算）
+                    # token 计数是 CPU 密集的纯计算，放到线程里跑，避免阻塞事件循环
                     input_tokens, output_tokens, total_tokens = (
-                        calculate_context_tokens(
+                        await asyncio.to_thread(
+                            calculate_context_tokens,
                             all_messages, model_name,
                             tools=tools, system_prompt=effective_prompt,
                         )
@@ -1936,7 +2000,7 @@ class AgentLoopStreamAPIView(View):
 
         # 5.1 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
         # 场景：前端先断开 SSE，再调用 stop API，可能导致信号留存到下一次请求
-        if clear_stop_signal(session_id):
+        if await aclear_stop_signal(session_id):
             logger.info(
                 f"AgentLoopStreamAPI: Cleared stale stop signal for session {session_id}"
             )
@@ -1945,7 +2009,7 @@ class AgentLoopStreamAPIView(View):
         if stream_mode:
             # 流式响应 (SSE)
             async def async_generator():
-                async for chunk in self._create_stream_generator(
+                inner = self._create_stream_generator(
                     request,
                     user_message,
                     session_id,
@@ -1959,7 +2023,10 @@ class AgentLoopStreamAPIView(View):
                     test_case_id,
                     use_pytest,
                     file_ids,
-                ):
+                )
+                # 心跳 + 空闲看门狗 + 总时长上限：
+                # 思考型模型长时间不产 token 时，保证链路持续有帧，并最终给出可读错误
+                async for chunk in guarded_sse(inner, session_id=session_id):
                     yield chunk
 
             response = StreamingHttpResponse(
@@ -2018,7 +2085,9 @@ class AgentLoopStreamAPIView(View):
         script_generation = None
 
         try:
-            async for chunk in self._create_stream_generator(
+            # 非流式请求把整个生成器的消费时限托付给同一套看门狗：
+            # 否则一旦模型卡住，该请求会长时间占住 worker 且没有任何超时保护。
+            inner = self._create_stream_generator(
                 request,
                 user_message,
                 session_id,
@@ -2032,6 +2101,14 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+            )
+            non_stream_deadline = _get_env_float(
+                "AGENT_LOOP_NON_STREAM_TIMEOUT", 600.0, min_value=30.0
+            )
+            async for chunk in guarded_sse(
+                inner,
+                session_id=session_id,
+                deadline=non_stream_deadline,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):
@@ -2148,7 +2225,6 @@ class AgentLoopStopAPIView(View):
 
     async def post(self, request, *args, **kwargs):
         """处理停止请求"""
-        from .stop_signal import set_stop_signal
 
         # 1. 认证
         try:
@@ -2167,8 +2243,8 @@ class AgentLoopStopAPIView(View):
         if not session_id:
             return api_error_response("session_id is required", 400)
 
-        # 3. 设置停止信号
-        success = set_stop_signal(session_id)
+        # 3. 设置停止信号（redis 后端下可跨 worker 生效）
+        success = await aset_stop_signal(session_id)
 
         logger.info(
             f"AgentLoopStopAPI: Stop signal set for session {session_id} by user {user.id}"
@@ -2362,7 +2438,7 @@ class AgentLoopResumeAPIView(View):
                 try:
                     from orchestrator_integration.builtin_tools import get_builtin_tools
 
-                    builtin_tools = get_builtin_tools(
+                    builtin_tools = await _offload(get_builtin_tools)(
                         user_id=user.id,
                         project_id=int(project_id) if project_id else 0,
                         test_case_id=None,
@@ -2390,7 +2466,7 @@ class AgentLoopResumeAPIView(View):
                     pass
 
                 tool_names = [t.name for t in tools] if tools else []
-                middleware = await sync_to_async(get_middleware_from_config)(
+                middleware = await _offload(get_middleware_from_config)(
                     active_config,
                     llm,
                     user=user,
@@ -2457,10 +2533,28 @@ class AgentLoopResumeAPIView(View):
                 # 9. 流式执行
                 # 清理上一轮可能残留的守卫事件，避免污染本轮
                 _drain_loop_guard_events(session_id)
+                clear_stream_emitted(session_id)
                 try:
                     async for stream_mode, chunk in agent.astream(
                         command, config=config, stream_mode=["updates", "messages"]
                     ):
+                        # 用户点击「停止生成」后立即中断（原 resume 链路缺失此检查，
+                        # 导致 HITL 审批后的续跑只能靠断开连接来中止）
+                        if await ashould_stop(session_id):
+                            await aclear_stop_signal(session_id)
+                            logger.info(
+                                "AgentLoopResumeAPI: Stop signal received at step %s",
+                                step_count,
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "stopped",
+                                    "message": "已停止生成",
+                                    "step": step_count,
+                                }
+                            )
+                            break
+
                         if stream_mode == "updates":
                             # 循环守卫事件（LoopGuardMiddleware 在模型调用前推送）
                             for guard_event in _drain_loop_guard_events(session_id):
@@ -2482,6 +2576,16 @@ class AgentLoopResumeAPIView(View):
                                             or "检测到重复工具调用，已注入纠偏提示",
                                             "tool": guard_event.get("tool"),
                                             "count": guard_event.get("count"),
+                                        }
+                                    )
+                                elif guard_event.get("kind") == "stream_reset":
+                                    # 模型在已输出部分内容后失败并重试：
+                                    # 通知前端丢弃残缺内容，避免出现重复文本
+                                    yield create_sse_data(
+                                        {
+                                            "type": "stream_reset",
+                                            "message": guard_event.get("message")
+                                            or "模型输出中断，正在重新生成…",
                                         }
                                     )
 
@@ -2555,7 +2659,7 @@ class AgentLoopResumeAPIView(View):
 
                                 if action_requests:
                                     # 获取用户工具偏好，为 always_reject 的工具添加 auto_reject 标记
-                                    user_approvals = await sync_to_async(
+                                    user_approvals = await _offload(
                                         get_user_tool_approvals
                                     )(user, session_id)
                                     for ar in action_requests:
@@ -2710,11 +2814,14 @@ class AgentLoopResumeAPIView(View):
                                 # 只发送模型节点产出的正文：过滤 ToolMessage、
                                 # 中间件节点以及守卫注入的纠偏/中止消息
                                 if _is_streamable_token(token, metadata):
+                                    # 记录"本轮已下发 token"，供重试去重判定
+                                    mark_stream_emitted(session_id)
                                     yield create_sse_data(
                                         {"type": "stream", "data": token.content}
                                     )
                             elif _is_streamable_token(chunk, None):
                                 # 兼容旧版本可能直接返回 message 的情况
+                                mark_stream_emitted(session_id)
                                 yield create_sse_data(
                                     {"type": "stream", "data": chunk.content}
                                 )
@@ -2766,7 +2873,8 @@ class AgentLoopResumeAPIView(View):
 
                     # 获取当前上下文 token 使用量（优先 usage_metadata，回退估算）
                     input_tokens, output_tokens, total_tokens = (
-                        calculate_context_tokens(
+                        await asyncio.to_thread(
+                            calculate_context_tokens,
                             all_messages, model_name,
                             tools=tools, system_prompt=resume_system_prompt,
                         )
@@ -2946,14 +3054,16 @@ class AgentLoopResumeAPIView(View):
 
         # 3. 返回 SSE 流式响应
         async def async_generator():
-            async for chunk in self._create_resume_stream_generator(
+            inner = self._create_resume_stream_generator(
                 user,
                 session_id,
                 project_id,
                 resume_data,
                 knowledge_base_id,
                 use_knowledge_base,
-            ):
+            )
+            # 审批后的续跑同样是长任务，需要同一套心跳与看门狗保护
+            async for chunk in guarded_sse(inner, session_id=session_id):
                 yield chunk
 
         response = StreamingHttpResponse(

@@ -32,8 +32,10 @@ from requirements.context_limits import (
 from .loop_guard import (
     LoopGuardConfig,
     build_loop_guard_middleware,
+    get_loop_guard_bus,
     load_loop_guard_config,
 )
+from .stream_progress import consume_stream_emitted
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +673,7 @@ def get_model_retry_middleware(
     initial_delay: float = 1.0,
     max_delay: float = 60.0,
     jitter: bool = True,
+    session_id: Optional[str] = None,
 ) -> ModelRetryMiddleware:
     """
     获取模型调用重试中间件
@@ -685,6 +688,8 @@ def get_model_retry_middleware(
         initial_delay: 初始延迟（秒）
         max_delay: 最大延迟（秒）
         jitter: 是否添加随机抖动
+        session_id: 会话 ID。传入后可在"已向前端下发过 token"的情况下
+            推送 stream_reset 事件，避免重试导致前端出现重复文本。
     """
     base_kwargs = {
         "max_retries": max_retries,
@@ -695,10 +700,37 @@ def get_model_retry_middleware(
     }
     total_attempts = max_retries + 1
 
+    def _retry_should_retry(exc: Exception) -> bool:
+        should_retry = _model_retry_should_retry(exc)
+        if not should_retry or not session_id:
+            return should_retry
+
+        # 已下发过 token 的重试会让模型从头生成，前端会看到重复内容。
+        # 这里先通知前端丢弃残缺内容，再让重试正常进行。
+        if consume_stream_emitted(session_id):
+            logger.warning(
+                "ModelRetryMiddleware: 本轮已输出部分内容后重试，推送 stream_reset。"
+                "session_id=%s error=%s",
+                session_id,
+                _fix_mojibake(str(exc)),
+            )
+            try:
+                get_loop_guard_bus().push(
+                    session_id,
+                    {
+                        "kind": "stream_reset",
+                        "message": "模型输出中断，正在重新生成…",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    },
+                )
+            except Exception as push_exc:  # noqa: BLE001
+                logger.warning("推送 stream_reset 事件失败: %s", push_exc)
+        return should_retry
+
     try:
         return ModelRetryMiddleware(
             **base_kwargs,
-            retry_on=_model_retry_should_retry,
+            retry_on=_retry_should_retry,
             on_failure=_build_model_retry_failure_handler(total_attempts),
         )
     except TypeError as e:
@@ -1149,7 +1181,12 @@ def get_standard_middleware(
     middleware = []
 
     if enable_model_retry:
-        middleware.append(get_model_retry_middleware())
+        # 传入 session_id：重试前若已下发过 token，先推送 stream_reset 避免内容重复
+        middleware.append(
+            get_model_retry_middleware(
+                session_id=loop_guard_session_id or hitl_session_id
+            )
+        )
         logger.debug("已添加 ModelRetryMiddleware")
 
     if enable_tool_retry:
@@ -1588,7 +1625,12 @@ async def get_standard_middleware_async(
     middleware = []
 
     if enable_model_retry:
-        middleware.append(get_model_retry_middleware())
+        # 传入 session_id：重试前若已下发过 token，先推送 stream_reset 避免内容重复
+        middleware.append(
+            get_model_retry_middleware(
+                session_id=loop_guard_session_id or hitl_session_id
+            )
+        )
         logger.debug("已添加 ModelRetryMiddleware")
 
     if enable_tool_retry:

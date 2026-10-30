@@ -127,6 +127,14 @@
       :test-case="pendingOptimizationTestCase"
       @submit="handleOptimizationSubmit"
     />
+
+    <!-- 后台生成任务常驻进度面板（替代"提交后只剩一条会消失的提示"） -->
+    <GenerationTaskPanel
+      :tasks="generationTasks"
+      @cancel="handleCancelGenerationTask"
+      @view="handleViewGenerationTask"
+      @dismiss="handleDismissGenerationTask"
+    />
   </div>
 </template>
 
@@ -164,8 +172,12 @@ import {
 } from '@/composables/useTestCaseExecutionQueue';
 import {
   sendChatMessageStream,
+  stopAgentLoop,
+  clearStreamState,
   activeStreams,
 } from '@/features/langgraph/services/chatService';
+import GenerationTaskPanel from '@/views/testcase/components/GenerationTaskPanel.vue';
+import type { GenerationTask } from '@/views/testcase/components/GenerationTaskPanel.vue';
 import type { ChatRequest } from '@/features/langgraph/types/chat';
 import { 
   updateTestCaseReviewStatus,
@@ -312,6 +324,57 @@ const testCaseListRef = ref<InstanceType<typeof TestCaseList> | null>(null);
 const allModules = ref<TestCaseModule[]>([]);
 const moduleTreeForForm = ref<TreeNodeData[]>([]); // 用于表单的模块树
 
+// ============== 生成任务进度跟踪 ==============
+// 提交生成后由一个常驻面板展示进度，避免用户面对"点了没反应"的黑箱。
+const generationTasks = ref<GenerationTask[]>([]);
+const generationAborters = new Map<string, AbortController>();
+
+const finishGenerationTask = (taskId: string, status: GenerationTask['status'], error?: string) => {
+  const task = generationTasks.value.find((item) => item.taskId === taskId);
+  if (!task) return;
+  task.status = status;
+  task.finishedAt = Date.now();
+  if (error) task.error = error;
+  generationAborters.delete(taskId);
+};
+
+const handleCancelGenerationTask = async (taskId: string) => {
+  const task = generationTasks.value.find((item) => item.taskId === taskId);
+  if (!task) return;
+
+  task.status = 'cancelled';
+  task.finishedAt = Date.now();
+
+  const controller = generationAborters.get(taskId);
+  generationAborters.delete(taskId);
+  controller?.abort();
+
+  // 双保险：断开 SSE 之外再显式通知后端停止，避免信号丢失后任务继续空跑
+  if (task.sessionId) {
+    try {
+      await stopAgentLoop(task.sessionId);
+    } catch (error) {
+      console.warn('[TestCaseManagement] stopAgentLoop failed:', error);
+    }
+  }
+};
+
+const handleViewGenerationTask = (taskId: string) => {
+  const task = generationTasks.value.find((item) => item.taskId === taskId);
+  if (task?.sessionId) {
+    localStorage.setItem('langgraph_session_id', task.sessionId);
+  }
+  router.push({ name: 'LangGraphChat' });
+};
+
+const handleDismissGenerationTask = (taskId: string) => {
+  const task = generationTasks.value.find((item) => item.taskId === taskId);
+  if (task?.sessionId) {
+    clearStreamState(task.sessionId);
+  }
+  generationTasks.value = generationTasks.value.filter((item) => item.taskId !== taskId);
+};
+
 const startAutomationTask = (
   requestData: ChatRequest,
   notificationTitle: string,
@@ -320,9 +383,22 @@ const startAutomationTask = (
   footerLinkText: string,
   onStarted?: (sessionId: string) => void
 ) => {
-  sendChatMessageStream(
+  const controller = new AbortController();
+  const taskId = `${notificationIdPrefix}-${Date.now()}`;
+  const task: GenerationTask = {
+    taskId,
+    sessionId: '',
+    title: notificationTitle,
+    status: 'running',
+    startedAt: Date.now(),
+  };
+  generationTasks.value.push(task);
+  generationAborters.set(taskId, controller);
+
+  void sendChatMessageStream(
     requestData,
     (sessionId) => {
+      task.sessionId = sessionId;
       localStorage.setItem('langgraph_session_id', sessionId);
 
       if (onStarted) {
@@ -370,8 +446,26 @@ const startAutomationTask = (
         duration: 10000,
         id: `${notificationIdPrefix}-${sessionId}`,
       });
-    }
-  );
+    },
+    controller.signal
+  )
+    .then(() => {
+      // 用户主动取消时保持 cancelled，不被后续完成态覆盖
+      const current = generationTasks.value.find((item) => item.taskId === taskId);
+      if (!current || current.status !== 'running') return;
+
+      const stream = task.sessionId ? activeStreams.value[task.sessionId] : null;
+      if (stream?.error) {
+        finishGenerationTask(taskId, 'failed', stream.error);
+      } else {
+        finishGenerationTask(taskId, 'done');
+      }
+    })
+    .catch((error) => {
+      const current = generationTasks.value.find((item) => item.taskId === taskId);
+      if (!current || current.status !== 'running') return;
+      finishGenerationTask(taskId, 'failed', error?.message || String(error));
+    });
 };
 
 const fetchAllModulesForForm = async () => {

@@ -109,6 +109,12 @@ langgraph-checkpoint-postgres==3.0.3
 psycopg2-binary==2.9.10
 psycopg[binary]==3.3.1
 
+# psycopg 连接池 - LGPL许可证
+# wharttest_django/checkpointer.py 直接使用 AsyncConnectionPool 复用检查点连接
+# （原本是 langgraph-checkpoint-postgres 的传递依赖，这里显式声明避免上游变动后缺失）
+# https://github.com/psycopg/psycopg/blob/master/LICENSE
+psycopg-pool==3.3.3
+
 # LangChain MCP适配器 - MIT许可证 (v1.x 重大升级)
 # https://github.com/langchain-ai/langchain-mcp-adapters/blob/main/LICENSE
 langchain-mcp-adapters==0.2.1

@@ -38,11 +38,13 @@
       <div class="chat-thread-surface">
         <ChatMessages
           ref="chatMessagesRef"
-          :messages="displayedMessages"
+          :messages="historyMessages"
+          :stream="currentStream"
           :is-loading="isLoading && messages.length === 0"
           :floating-tool-image-src="floatingToolImageSrc"
           :has-more="hasMoreHistory"
           :is-loading-more="isLoadingMoreHistory"
+          :active="pageActive"
           @toggle-expand="toggleExpand"
           @quote="handleQuote"
           @retry="handleRetry"
@@ -164,7 +166,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onActivated, watch, onUnmounted, computed, nextTick } from 'vue';
+import { ref, onMounted, onActivated, onDeactivated, watch, onUnmounted, computed, nextTick } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   sendChatMessageNonStream,
@@ -427,6 +429,8 @@ const isLoading = ref(false);
 const sessionId = ref<string>('');
 const chatSessions = ref<ChatSession[]>([]);
 const chatMessagesRef = ref<InstanceType<typeof ChatMessages> | null>(null);
+// keep-alive 下页面是否处于前台：切走后停止自动滚动等无谓渲染开销
+const pageActive = ref(true);
 const TITLE_REFRESH_MAX_ATTEMPTS = 10;
 const TITLE_REFRESH_BASE_DELAY_MS = 1000;
 const TITLE_REFRESH_MAX_DELAY_MS = 5000;
@@ -1695,12 +1699,24 @@ const updateSessionInList = (id: string, firstMessage?: string, updateTime: bool
   saveSessionsToStorage();
 };
 
+// 切换会话时，把 loading 状态同步为「目标会话自己的流状态」
+// 流对象按会话独立存在 activeStreams 中，切换会话不会终止旧会话的生成，
+// 因此这里不能简单沿用上一个会话的 isLoading，否则新会话输入框会被误锁。
+const syncLoadingFromStream = (id: string) => {
+  const stream = id ? activeStreams.value[id] : null;
+  isLoading.value = Boolean(stream && !stream.isComplete && !stream.isWaitingForApproval);
+};
+
 // 切换到指定会话
 const switchSession = async (id: string) => {
   if (id === sessionId.value) return;
 
-  // 终止正在进行的流式请求
-  // abortController.abort(); // 🔴 不再需要终止请求
+  // 注意：不 abort 正在进行的流式请求。
+  // 每个会话的流各自持有独立的 AbortController（见 chatService），
+  // 后台继续接收、按会话写回 activeStreams，切回来时可以直接续渲染。
+  // 早先在这里调用全局 abortController.abort() 会把所有会话的流一起打断。
+
+  syncLoadingFromStream(id);
 
   sessionId.value = id;
   saveSessionId(id);
@@ -1755,8 +1771,9 @@ const switchSession = async (id: string) => {
 
 // 创建新对话
 const createNewChat = () => {
-  // 终止正在进行的流式请求
-  // abortController.abort(); // 🔴 不再需要终止请求
+  // 同样不终止后台流：旧会话的生成继续在 activeStreams 中推进。
+  // 新会话本身没有任何流，loading 直接归位，输入框立刻可用。
+  isLoading.value = false;
 
   // 清除当前会话ID和消息
   sessionId.value = '';
@@ -2045,106 +2062,15 @@ const handleSendMessage = async (data: {
   }
 };
 
-// 计算用于显示的最终消息列表
-const displayedMessages = computed(() => {
-  const combined = messages.value.filter(message => !isHiddenRuntimeMessageType(message.messageType));
-  // 从共享状态中获取当前会话的流
-  const stream = sessionId.value ? activeStreams.value[sessionId.value] : null;
+// 历史消息列表（对象引用稳定，流式更新不会触发这里重算）
+const historyMessages = computed(() =>
+  messages.value.filter(message => !isHiddenRuntimeMessageType(message.messageType))
+);
 
-  // 如果当前会话有流（无论是否完成）
-  if (stream) {
-    // 🆕 检查是否需要补充用户消息（针对从其他页面跳转过来的情况）
-    if (stream.userMessage && combined.length === 0) {
-      combined.push({
-        content: stream.userMessage,
-        isUser: true,
-        time: stream.userMessageTime || getCurrentTime(), // 使用会话创建时间
-        messageType: 'human'
-      });
-    }
-
-    // 检查最后一条消息是否已经包含了流式内容
-    // 如果流已完成且内容已固化到 messages.value，则不需要再添加
-    const lastMsg = combined[combined.length - 1];
-    const contentAlreadyInMessages = lastMsg &&
-      !lastMsg.isUser &&
-      lastMsg.content === stream.content &&
-      !lastMsg.isLoading;
-
-    // 只有在内容尚未固化时才添加流式内容
-    if (!contentAlreadyInMessages) {
-      // 首先添加工具消息和 Agent Step 消息(如果有)
-      if (stream.messages && stream.messages.length > 0) {
-        stream.messages.forEach(msg => {
-          if (isHiddenRuntimeMessageType(msg.type as ChatMessage['messageType'])) {
-            return;
-          }
-
-          const chatMsg: ChatMessage = {
-            content: msg.content,
-            isUser: false,
-            time: msg.time,
-            messageType: msg.type as ChatMessage['messageType'],
-            toolName: msg.toolName,
-            isExpanded: msg.isExpanded,
-            imageDataUrl: msg.imageDataUrl,
-            fileAttachments: msg.fileAttachments,
-            isThinkingProcess: msg.isThinkingProcess,
-            isThinkingExpanded: msg.isThinkingExpanded
-          };
-
-          // Agent Step 专用字段
-          if (typeof msg.stepNumber === 'number') {
-            chatMsg.stepNumber = msg.stepNumber;
-          }
-          if (typeof msg.maxSteps === 'number') {
-            chatMsg.maxSteps = msg.maxSteps;
-          }
-          if (msg.stepStatus) {
-            chatMsg.stepStatus = msg.stepStatus;
-          }
-
-          combined.push(chatMsg);
-        });
-      }
-
-      // 然后处理AI消息
-      if (stream.error) {
-        // 如果有错误，显示错误消息
-        combined.push({
-          content: stream.error,
-          isUser: false,
-          time: getCurrentTime(),
-          messageType: 'ai',
-          isStreaming: false,
-        });
-      }
-      else if (!stream.content || stream.content.trim() === '') {
-        // 如果流式内容为空或只有空白字符，且流还未完成，显示加载中状态
-        if (!stream.isComplete) {
-          combined.push({
-            content: '',
-            isUser: false,
-            time: getCurrentTime(),
-            messageType: 'ai',
-              isLoading: true,
-          });
-        }
-      }
-      else {
-        // 有实际内容时，显示流式内容
-        combined.push({
-          content: stream.content,
-          isUser: false,
-          time: getCurrentTime(),
-          messageType: 'ai',
-          isStreaming: !stream.isComplete,
-        });
-      }
-    }
-  }
-  return combined;
-});
+// 当前会话的流式状态：交给 StreamingBubble 独立渲染
+const currentStream = computed(() =>
+  sessionId.value ? (activeStreams.value[sessionId.value] ?? null) : null
+);
 
 // 处理流式消息
 const handleStreamMessage = async (requestData: ChatRequest, userMessage: string) => {
@@ -2164,14 +2090,26 @@ const handleStreamMessage = async (requestData: ChatRequest, userMessage: string
     }
   };
 
-  await sendChatMessageStream(
-    requestData,
-    handleStart,
-    abortController.signal
-  );
-
-  // sendChatMessageStream 现在是异步的，但我们不在这里等待它完成
-  // 使用 watch 监视 isComplete 状态
+  try {
+    await sendChatMessageStream(
+      requestData,
+      handleStart,
+      abortController.signal
+    );
+  } catch (error) {
+    // sendChatMessageStream 内部已把错误写入 stream.error，这里只兜底 loading 状态
+    console.error('[LangGraphChatView] Stream failed:', error);
+  } finally {
+    // ⭐ 关键：无论成功、失败还是被中断，都必须回收 loading，
+    // 否则一旦 start 事件没有到达（401/500/网络断开），按钮会无限转圈。
+    const currentStream = sessionId.value ? activeStreams.value[sessionId.value] : null;
+    if (!currentStream || currentStream.isComplete) {
+      isLoading.value = false;
+    } else {
+      // 流还在后台继续（例如 HITL 等待审批），交给 watch 在完成时回收
+      safeStopLoading();
+    }
+  }
 };
 
 // 处理非流式消息（使用统一的 Agent Loop 接口）
@@ -2483,45 +2421,47 @@ const handlePromptsUpdated = async () => {
   }
 };
 
-// 监听知识库设置变化，自动保存到本地存储
 // 监视当前会话的流是否完成
+// ⭐ 只监听完成标记，不做 deep watch：原先的 deep 监听会在每次流式 flush 时
+// 深遍历整个 stream（含 base64 截图与完整工具输出），是页面卡顿的元凶之一。
 watch(
-  () => (sessionId.value ? activeStreams.value[sessionId.value] : null),
-  async (stream) => {
-    if (stream && stream.isComplete) {
-      // ⭐ HITL：如果正在等待审批，不触发流完成逻辑
-      if (stream.isWaitingForApproval) {
-        console.log(`⏸️ 会话 ${sessionId.value} 等待 HITL 审批，暂不处理流完成`);
-        return;
-      }
+  () => (sessionId.value ? activeStreams.value[sessionId.value]?.isComplete : false),
+  async (isComplete) => {
+    if (!isComplete) return;
+    const stream = sessionId.value ? activeStreams.value[sessionId.value] : null;
+    if (!stream) return;
 
-      console.log(`会话 ${sessionId.value} 的流已完成。`);
-
-      const currentSessionId = sessionId.value;
-
-      // 🔧 流完成后立即固化内容到messages.value，避免清理后内容丢失
-      solidifyStreamContent();
-
-      // 后端标题总结是异步写库，这里短轮询当前会话标题，不阻塞消息完成态。
-      if (currentSessionId && projectStore.currentProjectId) {
-        void refreshSessionListEntryFromServer(
-          currentSessionId,
-          projectStore.currentProjectId,
-          { applyAutoTitle: false }
-        ).then((titleReady) => {
-          if (!titleReady && projectStore.currentProjectId) {
-            scheduleSessionTitleRefresh(currentSessionId, projectStore.currentProjectId);
-          }
-        });
-      }
-
-      // 如果是通过本页面发送的消息，则需要在这里设置 isLoading = false
-      if (isLoading.value) {
-        isLoading.value = false;
-      }
+    // ⭐ HITL：如果正在等待审批，不触发流完成逻辑
+    if (stream.isWaitingForApproval) {
+      console.log(`⏸️ 会话 ${sessionId.value} 等待 HITL 审批，暂不处理流完成`);
+      return;
     }
-  },
-  { deep: true }
+
+    console.log(`会话 ${sessionId.value} 的流已完成。`);
+
+    const currentSessionId = sessionId.value;
+
+    // 🔧 流完成后立即固化内容到messages.value，避免清理后内容丢失
+    solidifyStreamContent();
+
+    // 后端标题总结是异步写库，这里短轮询当前会话标题，不阻塞消息完成态。
+    if (currentSessionId && projectStore.currentProjectId) {
+      void refreshSessionListEntryFromServer(
+        currentSessionId,
+        projectStore.currentProjectId,
+        { applyAutoTitle: false }
+      ).then((titleReady) => {
+        if (!titleReady && projectStore.currentProjectId) {
+          scheduleSessionTitleRefresh(currentSessionId, projectStore.currentProjectId);
+        }
+      });
+    }
+
+    // 如果是通过本页面发送的消息，则需要在这里设置 isLoading = false
+    if (isLoading.value) {
+      isLoading.value = false;
+    }
+  }
 );
 
 // 🔧 修复：监听项目ID变化，当项目加载完成后自动加载会话数据
@@ -2628,6 +2568,8 @@ onActivated(async () => {
   // 每次组件被激活时（从其他页面切回来）
   console.log('✅ Chat component activated.');
 
+  pageActive.value = true;
+
   // 0. 加载保存的提示词ID（从其他页面跳转时可能已更新）
   loadSavedPromptId();
 
@@ -2661,6 +2603,13 @@ onActivated(async () => {
   // 5. 页面激活后滚动到最新消息
   await nextTick();
   chatMessagesRef.value?.scrollToBottom();
+});
+
+onDeactivated(() => {
+  // keep-alive 缓存并切到后台：DOM 已脱离视口，继续排队 rAF 自动滚动只是白烧 CPU。
+  // 流式数据仍会按会话写入 activeStreams，切回来由 onActivated 补渲染与定位。
+  pageActive.value = false;
+  console.log('💤 Chat component deactivated.');
 });
 
 onUnmounted(() => {

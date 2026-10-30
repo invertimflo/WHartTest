@@ -59,6 +59,12 @@ interface StreamState {
     }>;
   };
   isWaitingForApproval?: boolean; // 是否正在等待用户审批
+  /** 后端心跳上报的当前阶段：model（模型思考/生成）| tool（工具执行）| summarizing（上下文压缩） */
+  phase?: string;
+  /** 本轮已等待秒数（来自心跳），用于「模型思考中 xx s」提示 */
+  waitingSeconds?: number;
+  /** 最近一次收到任何 SSE 帧的时间戳，用于前端 idle 判定与展示 */
+  lastActivityAt?: number;
 }
 
 // Agent Loop SSE 事件类型定义（供文档和类型参考）
@@ -163,9 +169,15 @@ function createStreamFlushThrottle(
   let pendingDelta = '';
   let rafId = 0;
   let fallbackTimer: ReturnType<typeof setTimeout> | 0 = 0;
-  const FALLBACK_FLUSH_MS = 50;
+  // 兜底定时器从 50ms 放宽到 80ms：思考型模型输出本身较慢，
+  // 更低的刷新频率不会影响观感，但能显著减少每秒的重渲染次数。
+  const FALLBACK_FLUSH_MS = 80;
+  // 两次真正写入响应式状态的最小间隔，防止 144Hz 屏幕下 rAF 过密。
+  const MIN_FLUSH_INTERVAL_MS = 60;
+  let lastFlushAt = 0;
 
-  const flush = () => {
+  /** 立即把缓冲写入响应式状态（关键事件前调用，保证不丢字） */
+  const flushNow = () => {
     rafId = 0;
     if (fallbackTimer) {
       clearTimeout(fallbackTimer as ReturnType<typeof setTimeout>);
@@ -176,6 +188,25 @@ function createStreamFlushThrottle(
       activeStreams.value[sessionId].content += pendingDelta;
     }
     pendingDelta = '';
+    lastFlushAt = Date.now();
+  };
+
+  /** rAF/定时器回调：受最小间隔约束 */
+  const scheduledFlush = () => {
+    rafId = 0;
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer as ReturnType<typeof setTimeout>);
+      fallbackTimer = 0;
+    }
+    if (!pendingDelta) {
+      return;
+    }
+    const wait = MIN_FLUSH_INTERVAL_MS - (Date.now() - lastFlushAt);
+    if (wait > 0) {
+      fallbackTimer = setTimeout(scheduledFlush, wait);
+      return;
+    }
+    flushNow();
   };
 
   const push = (chunk: string) => {
@@ -183,10 +214,10 @@ function createStreamFlushThrottle(
     pendingDelta += chunk;
     if (rafId) return;
     if (typeof requestAnimationFrame !== 'undefined') {
-      rafId = requestAnimationFrame(flush);
+      rafId = requestAnimationFrame(scheduledFlush);
     }
     if (!fallbackTimer) {
-      fallbackTimer = setTimeout(flush, FALLBACK_FLUSH_MS);
+      fallbackTimer = setTimeout(scheduledFlush, FALLBACK_FLUSH_MS);
     }
   };
 
@@ -202,7 +233,7 @@ function createStreamFlushThrottle(
     pendingDelta = '';
   };
 
-  return { push, flush, cancel };
+  return { push, flush: flushNow, cancel };
 }
 
 const API_BASE_URL = '/lg/chat';
@@ -448,8 +479,68 @@ export async function sendChatMessageStream(
   let token = authStore.getAccessToken;
   let streamSessionId: string | null = data.session_id || null;
 
+  // 已知 session_id 时先建好流条目，保证 start 事件之前就失败也能把错误渲染到气泡上
+  const ensureStreamEntry = () => {
+    const sid = streamSessionId;
+    if (!sid || activeStreams.value[sid]) return;
+    activeStreams.value[sid] = {
+      content: '',
+      isComplete: false,
+      messages: [],
+      userMessage: data.message,
+      userMessageTime: formatStreamTime(),
+      currentStep: 0,
+      lastActivityAt: Date.now(),
+    };
+  };
+  ensureStreamEntry();
+
+  // ⭐ 前端 idle 看门狗：后端每 10s 发心跳，45s 内没有任何字节即判定链路已死。
+  // 首次等待（模型预热、工具加载）允许更长的首字节时间。
+  const IDLE_TIMEOUT_MS = 45_000;
+  const FIRST_BYTE_TIMEOUT_MS = 150_000;
+  const internalController = new AbortController();
+  let idleAborted = false;
+  let idleTimer: ReturnType<typeof setTimeout> | 0 = 0;
+  const clearIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer as ReturnType<typeof setTimeout>);
+      idleTimer = 0;
+    }
+  };
+  const armIdleTimer = (timeoutMs: number) => {
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleAborted = true;
+      console.warn('[ChatService] Stream idle timeout, aborting request');
+      internalController.abort();
+    }, timeoutMs);
+  };
+  if (signal) {
+    if (signal.aborted) {
+      internalController.abort();
+    } else {
+      signal.addEventListener('abort', () => internalController.abort(), { once: true });
+    }
+  }
+
   // 错误处理函数，用于更新全局状态
   const handleError = (error: any, sessionId: string | null) => {
+    if (streamSessionId && !activeStreams.value[streamSessionId]) {
+      ensureStreamEntry();
+    }
+    const targetId = sessionId || streamSessionId;
+
+    if (idleAborted) {
+      console.error('[ChatService] Stream idle timeout');
+      if (targetId && activeStreams.value[targetId]) {
+        activeStreams.value[targetId].error =
+          `连接已中断（超过 ${Math.round(IDLE_TIMEOUT_MS / 1000)} 秒未收到任何响应），请重试`;
+        activeStreams.value[targetId].isComplete = true;
+      }
+      return;
+    }
+
     // 判断是否是用户主动中断（AbortError）
     const isAbortError = error?.name === 'AbortError' ||
                          error?.message?.includes('aborted') ||
@@ -459,8 +550,8 @@ export async function sendChatMessageStream(
     if (isAbortError) {
       // 用户主动中断，静默处理，不显示错误
       console.log('[ChatService] Stream aborted by user');
-      if (sessionId && activeStreams.value[sessionId]) {
-        activeStreams.value[sessionId].isComplete = true;
+      if (targetId && activeStreams.value[targetId]) {
+        activeStreams.value[targetId].isComplete = true;
         // 不设置 error，避免显示错误提示
       }
       return;
@@ -468,9 +559,9 @@ export async function sendChatMessageStream(
 
     // 真正的错误
     console.error('Stream error:', error);
-    if (sessionId && activeStreams.value[sessionId]) {
-      activeStreams.value[sessionId].error = error.message || '流式请求失败';
-      activeStreams.value[sessionId].isComplete = true;
+    if (targetId && activeStreams.value[targetId]) {
+      activeStreams.value[targetId].error = error.message || '流式请求失败';
+      activeStreams.value[targetId].isComplete = true;
     }
   };
 
@@ -483,6 +574,8 @@ export async function sendChatMessageStream(
     // ⭐ 弱模型长循环节流：逐 token 内容累积到缓冲，rAF 批量 flush 到响应式对象
     const throttle = createStreamFlushThrottle(() => streamSessionId);
 
+    armIdleTimer(FIRST_BYTE_TIMEOUT_MS);
+
     let response = await fetch(`${getApiBaseUrl()}${AGENT_LOOP_API_URL}/`, {
       method: 'POST',
       headers: {
@@ -491,7 +584,7 @@ export async function sendChatMessageStream(
         'Authorization': `Bearer ${token}`,
       },
       body: JSON.stringify(data),
-      signal,
+      signal: internalController.signal,
     });
 
     if (response.status === 401) {
@@ -506,7 +599,7 @@ export async function sendChatMessageStream(
             'Authorization': `Bearer ${token}`,
           },
           body: JSON.stringify(data),
-          signal,
+          signal: internalController.signal,
         });
       } else {
         handleError(new Error('登录已过期，请重新登录'), streamSessionId);
@@ -528,7 +621,10 @@ export async function sendChatMessageStream(
     let buffer = '';
     while (true) {
       const { done, value } = await reader.read();
-      
+
+      // 任何字节（含心跳帧）都算链路存活
+      armIdleTimer(IDLE_TIMEOUT_MS);
+
       if (done) {
         // ⭐ 收尾：先 flush 缓冲的 token，再取消未触发的 rAF/兜底定时器，防止末尾丢字
         throttle.flush();
@@ -602,8 +698,52 @@ export async function sendChatMessageStream(
         try {
           const parsed = JSON.parse(jsonData);
 
+          // ⭐ 心跳帧：只更新"等待时长/阶段"等展示字段，不产生任何内容
+          if (parsed.type === 'heartbeat') {
+            if (streamSessionId && activeStreams.value[streamSessionId]) {
+              const st = activeStreams.value[streamSessionId];
+              st.lastActivityAt = Date.now();
+              st.phase = parsed.phase || st.phase;
+              const elapsed = normalizeNumericField(parsed.elapsed_s);
+              if (elapsed !== undefined) st.waitingSeconds = elapsed;
+            }
+            continue;
+          }
+
+          // ⭐ 阶段切换（如上下文压缩）：只更新提示，不改变内容
+          if (parsed.type === 'phase') {
+            if (streamSessionId && activeStreams.value[streamSessionId]) {
+              activeStreams.value[streamSessionId].phase = parsed.phase;
+              activeStreams.value[streamSessionId].lastActivityAt = Date.now();
+            }
+            continue;
+          }
+
+          // ⭐ 模型中途断连后重试：丢弃本轮已输出的内容，避免出现重复文本
+          if (parsed.type === 'stream_reset') {
+            if (streamSessionId && activeStreams.value[streamSessionId]) {
+              throttle.flush();
+              throttle.cancel();
+              const st = activeStreams.value[streamSessionId];
+              st.content = '';
+              st.phase = 'model';
+              st.messages.push({
+                content: parsed.message || '模型输出中断，正在重新生成…',
+                type: 'system',
+                time: formatStreamTime(),
+              });
+            }
+            continue;
+          }
+
           if (parsed.type === 'error') {
             handleError(new Error(parsed.message || '流式请求失败'), streamSessionId);
+            // 出错后主动释放连接，避免后端任务继续空跑与连接泄漏
+            try {
+              await reader.cancel();
+            } catch (cancelError) {
+              console.warn('[ChatService] reader.cancel failed:', cancelError);
+            }
             return;
           }
 
@@ -833,6 +973,8 @@ export async function sendChatMessageStream(
     }
   } catch (error) {
     handleError(error, streamSessionId);
+  } finally {
+    clearIdleTimer();
   }
 }
 
